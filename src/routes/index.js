@@ -12,6 +12,8 @@ router.use('/billing',    require('./billing.routes'));
 router.use('/admin',      require('./admin'));
 router.use('/linkedin', require('./linkedin.routes'));
 
+router.use('/config',     require('./config.routes'));
+
 router.get('/ping', (_req, res) => {
   res.json({ success: true, message: 'API is running', timestamp: new Date() });
 });

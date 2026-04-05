@@ -1,7 +1,8 @@
 const UserCredits = require('../models/UserCredits');
 const ActivityLog = require('../models/ActivityLog');
 const { CreditError, ForbiddenError } = require('../utils/errors');
-const { CREDIT_COSTS, CREDIT_BREAKDOWN_MAP, PLAN_LIMITS } = require('../utils/constants');
+const { CREDIT_BREAKDOWN_MAP, PLAN_LIMITS } = require('../utils/constants');
+const { getCreditCosts } = require('../utils/appConfig');
 
 // ── Guard: restrict endpoint to specific plan tiers ──────────────
 const planGuard = (...allowedPlans) => (req, _res, next) => {
@@ -44,6 +45,7 @@ const checkDailySearchLimit = async (req, _res, next) => {
 
 const requireCredits = (action) => async (req, _res, next) => {
   try {
+    const CREDIT_COSTS = await getCreditCosts();
     const cost = CREDIT_COSTS[action] || 0;
     if (cost === 0) return next();
 

@@ -2,6 +2,7 @@ const PlatformConfig = require('../../models/PlatformConfig');
 const AdminAuditLog  = require('../../models/AdminAuditLog');
 const { success }    = require('../../utils/response.util');
 const { NotFoundError, ValidationError } = require('../../utils/errors');
+const { bustAppConfig } = require('../../utils/appConfig');
 
 exports.getAll = async (req, res, next) => {
   try {
@@ -39,6 +40,7 @@ exports.update = async (req, res, next) => {
       ip:         req.ip,
     });
 
+    await bustAppConfig(req.params.key);
     return success(res, config, 'Config updated');
   } catch (err) { next(err); }
 };
@@ -56,6 +58,7 @@ exports.bulkUpdate = async (req, res, next) => {
         { upsert: true, new: true }
       );
       results.push(config);
+      await bustAppConfig(key);
     }
 
     return success(res, results, `${results.length} configs updated`);
