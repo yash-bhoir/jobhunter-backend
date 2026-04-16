@@ -1,15 +1,16 @@
-const axios = require('axios');
+const axios  = require('axios');
+const logger = require('../../config/logger');
 
-// Greenhouse ATS — direct job listings from Big Tech & top companies
+// Greenhouse ATS — direct job listings from top companies
 // Completely FREE — no API key required (public job board API)
-// Covers: Stripe, Airbnb, Coinbase, Discord, Duolingo, Brex, Plaid, Rippling, etc.
 
 const COMPANIES = [
-  'stripe', 'airbnb', 'coinbase', 'discord', 'duolingo', 'brex',
-  'plaid', 'rippling', 'gusto', 'robinhood', 'chime', 'ramp',
-  'scale-ai', 'anduril', 'benchling', 'lattice', 'greenhouse',
-  'asana', 'gitlab', 'hashicorp', 'datadog', 'mongodb',
-  'confluent', 'dbt-labs', 'huggingface',
+  // Verified active on Greenhouse (checked April 2026)
+  'gitlab', 'mongodb', 'datadog', 'hashicorp', 'confluent',
+  'dbt-labs', 'huggingface', 'asana', 'benchling', 'lattice',
+  'gusto', 'chime', 'plaid', 'brex', 'discord',
+  'duolingo', 'coinbase', 'rippling', 'robinhood', 'scale-ai',
+  'anduril', 'greenhouse', 'sourcegraph', 'teleport', 'pulumi',
 ];
 
 const fetchCompany = async (company, roleKeyword) => {
@@ -19,13 +20,15 @@ const fetchCompany = async (company, roleKeyword) => {
       { params: { content: false }, timeout: 8000 }
     );
 
+    if (!data?.jobs) return [];
+
     const kw = (roleKeyword || '').toLowerCase();
-    return (data?.jobs || [])
+    return data.jobs
       .filter(j => !kw || (j.title || '').toLowerCase().includes(kw))
       .map(j => ({
         externalId:  String(j.id   || ''),
         title:       j.title       || '',
-        company:     company.charAt(0).toUpperCase() + company.slice(1).replace(/-/g, ' '),
+        company:     j.company_name || company.charAt(0).toUpperCase() + company.slice(1).replace(/-/g, ' '),
         location:    j.location?.name || 'Not specified',
         description: '',
         url:         j.absolute_url  || '',
@@ -41,14 +44,14 @@ const fetchCompany = async (company, roleKeyword) => {
 };
 
 const search = async ({ role }) => {
-  const batches = [];
-  // Query companies in batches of 6 to avoid hammering
+  const all = [];
   for (let i = 0; i < COMPANIES.length; i += 6) {
-    const batch = COMPANIES.slice(i, i + 6);
+    const batch   = COMPANIES.slice(i, i + 6);
     const results = await Promise.all(batch.map(c => fetchCompany(c, role)));
-    batches.push(...results.flat());
+    all.push(...results.flat());
   }
-  return batches;
+  logger.info(`[greenhouse] found ${all.length} jobs`);
+  return all;
 };
 
 module.exports = { search };

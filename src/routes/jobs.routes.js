@@ -8,6 +8,11 @@ router.use(authenticate);
 
 router.get   ('/',             ctrl.getJobs);
 router.get   ('/saved',        ctrl.getSavedJobs);
+
+// ── Insights & follow-ups (before /:id to avoid param collision) ──
+router.get   ('/insights',             ctrl.getInsights);
+router.get   ('/follow-ups',           ctrl.getFollowUps);
+
 router.get   ('/:id',          ctrl.getJob);
 router.patch ('/:id/status',   ctrl.updateStatus);
 router.post  ('/:id/save',     ctrl.saveJob);
@@ -18,5 +23,18 @@ router.get ('/:id/company',      planGuard('pro', 'team'), requireCredits('AI_AN
 router.get ('/:id/contacts',     ctrl.getJobContacts);
 router.post('/:id/find-employees', planGuard('pro', 'team'), requireCredits('AI_ANALYSIS'), ctrl.findJobEmployees);
 router.post('/check-duplicate',  ctrl.checkDuplicate);
+
+// ── Liveness detection ────────────────────────────────────────────
+router.post('/:id/check-liveness', ctrl.checkLiveness);
+
+// ── Follow-up management ──────────────────────────────────────────
+router.post('/:id/follow-up/sent',   ctrl.markFollowUpSent);
+router.post('/:id/follow-up/snooze', ctrl.snoozeFollowUp);
+
+// ── Deep evaluation (A-F scoring) ────────────────────────────────
+router.post('/:id/deep-evaluate', planGuard('pro', 'team'), requireCredits('AI_ANALYSIS'), ctrl.deepEvaluate);
+
+// ── Interview prep generator ──────────────────────────────────────
+router.post('/:id/interview-prep', requireCredits('AI_ANALYSIS'), ctrl.generateInterviewPrep);
 
 module.exports = router;

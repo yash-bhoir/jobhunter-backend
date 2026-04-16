@@ -273,4 +273,150 @@ const generateFallbackExplanation = ({ job, user }) => {
   };
 };
 
-module.exports = { explainMatch, analyzeResumeGaps, researchCompany };
+// ── Deep Job Evaluation (career-ops A-F framework) ───────────────
+// Inspired by career-ops oferta.md — 6-block evaluation
+// Block A: Role context + archetype
+// Block B: CV gap analysis
+// Block C: Seniority positioning
+// Block D: Salary / compensation data
+// Block E: Top CV changes for this role
+// Block F: Interview prep questions
+const deepEvaluateJob = async ({ job, user }) => {
+  if (!process.env.OPENAI_API_KEY) {
+    return {
+      score:        job.matchScore / 20, // convert 0-100 → 0-5
+      archetype:    'Unknown',
+      summary:      `${job.title} at ${job.company}`,
+      cvGaps:       [],
+      topCvChanges: ['Tailor your headline for this role'],
+      salaryRange:  null,
+      interviewQs:  ['Tell me about yourself', 'Why this company?'],
+    };
+  }
+
+  const client = getClient();
+  const p      = user?.profile || {};
+  const skills = [...(p.skills || []), ...(user?.resume?.extractedSkills || [])];
+  const desc   = (job.description || '').slice(0, 1200);
+
+  const prompt = `You are a senior career coach. Evaluate this job for this candidate using the 6-block framework.
+
+CANDIDATE:
+- Name: ${p.firstName} ${p.lastName}
+- Current Role: ${p.currentRole || 'Not specified'}
+- Experience: ${p.experience || 0} years
+- Target Role: ${p.targetRole || 'Not specified'}
+- Skills: ${skills.join(', ') || 'None listed'}
+- Work Preference: ${p.workType || 'any'}
+- Current CTC: ${p.currentCTC || 'Not specified'}
+- Expected CTC: ${p.expectedCTC || 'Not specified'}
+
+JOB:
+- Title: ${job.title}
+- Company: ${job.company}
+- Location: ${job.location || 'Not specified'}
+- Remote: ${job.remote ? 'Yes' : 'No'}
+- Salary: ${job.salary || 'Not specified'}
+- Description: ${desc}
+
+Return JSON only — be specific, not generic:
+{
+  "score": 3.8,
+  "archetype": "one of: Fullstack | Backend | Frontend | Mobile | DevOps | ML/AI | PM | Design | Data | Management | Sales | Other",
+  "summary": "One sentence TL;DR of this role and fit",
+  "roleContext": "What this role actually does day-to-day in 2 sentences",
+  "cvGaps": ["Specific gap 1 — what's missing and why it matters", "Gap 2"],
+  "gapMitigations": ["How to address gap 1", "How to address gap 2"],
+  "topCvChanges": ["Specific CV tweak 1", "Specific CV tweak 2", "Specific CV tweak 3"],
+  "salaryRange": "Market range for this role based on industry knowledge e.g. ₹18-28 LPA or $120-160k",
+  "salaryVerdict": "Under-market / Fair / Premium",
+  "seniorityFit": "Your ${p.experience || 0} years fits the [Senior/Mid/Junior] level this role targets",
+  "interviewQs": [
+    "Technical question likely to be asked",
+    "Behavioral question about past experience",
+    "Culture fit question specific to ${job.company}",
+    "A tricky scenario question"
+  ],
+  "redFlags": ["Any concern about this role or company — or empty array"],
+  "verdict": "STRONG APPLY | APPLY WITH TAILORING | SKIP | RESEARCH MORE"
+}`;
+
+  try {
+    const response = await client.chat.completions.create({
+      model:       'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are a career coach running a structured job evaluation. Return valid JSON only. Be specific and actionable — avoid generic advice.' },
+        { role: 'user',   content: prompt },
+      ],
+      max_tokens:  1000,
+      temperature: 0.3,
+    });
+
+    const raw    = response.choices[0].message.content.replace(/```json|```/g, '').trim();
+    const result = JSON.parse(raw);
+    return result;
+  } catch (err) {
+    logger.warn(`[JobAnalyzer] deepEvaluate failed: ${err.message}`);
+    throw err;
+  }
+};
+
+// ── Interview Prep Generator ──────────────────────────────────────
+// Generates STAR+R questions mapped to JD requirements (career-ops Block F)
+const generateInterviewPrep = async ({ job, user }) => {
+  if (!process.env.OPENAI_API_KEY) {
+    return {
+      questions: [
+        { question: 'Tell me about yourself', starHint: 'Situation → your background, Task → what you wanted to achieve, Action → steps taken, Result → current position, Reflection → what you learned' },
+        { question: `Why do you want to work at ${job.company}?`, starHint: 'Research the company mission and connect it to your own goals and values.' },
+      ],
+    };
+  }
+
+  const client = getClient();
+  const p      = user?.profile || {};
+  const skills = [...(p.skills || []), ...(user?.resume?.extractedSkills || [])];
+  const desc   = (job.description || '').slice(0, 1000);
+
+  const prompt = `Generate interview prep for this candidate for this specific role.
+
+CANDIDATE: ${p.experience || 0} years exp, skills: ${skills.slice(0, 10).join(', ')}
+JOB: ${job.title} at ${job.company}
+DESCRIPTION: ${desc}
+
+Return JSON only:
+{
+  "questions": [
+    {
+      "question": "Specific behavioral question mapped to a JD requirement",
+      "type": "behavioral | technical | culture | situational",
+      "starHint": "Brief STAR+R coaching hint — what Situation to describe, what Result to highlight, what Reflection shows seniority"
+    }
+  ],
+  "companyResearchTips": ["Research tip 1 specific to ${job.company}", "Tip 2"],
+  "keywordsToMention": ["keyword1 from JD to weave into answers"],
+  "questionsToAsk": ["Smart question to ask the interviewer about this role"]
+}
+
+Generate exactly 6 questions: 2 technical, 2 behavioral, 1 situational, 1 culture-fit.`;
+
+  try {
+    const response = await client.chat.completions.create({
+      model:       'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are an interview coach. Generate specific, role-relevant interview prep. Return valid JSON only.' },
+        { role: 'user',   content: prompt },
+      ],
+      max_tokens:  800,
+      temperature: 0.4,
+    });
+
+    const raw    = response.choices[0].message.content.replace(/```json|```/g, '').trim();
+    return JSON.parse(raw);
+  } catch (err) {
+    logger.warn(`[JobAnalyzer] interviewPrep failed: ${err.message}`);
+    throw err;
+  }
+};
+
+module.exports = { explainMatch, analyzeResumeGaps, researchCompany, deepEvaluateJob, generateInterviewPrep };

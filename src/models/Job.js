@@ -66,6 +66,33 @@ const jobSchema = new mongoose.Schema({
   postedAt: Date,
   expired:   { type: Boolean, default: false },
   expiredAt: Date,
+
+  // ── Liveness detection (career-ops inspired) ──────────────────────
+  liveness:          { type: String, enum: ['active', 'expired', 'uncertain'], default: null },
+  livenessCheckedAt: Date,
+
+  // ── Follow-up reminder system ─────────────────────────────────────
+  followUpDate:  Date,    // next follow-up due date
+  followUpCount: { type: Number, default: 0 }, // how many follow-ups sent
+  followUpNotes: String,
+
+  // ── Deep evaluation report (A-F scoring) ─────────────────────────
+  deepEval: {
+    score:         Number,   // 0–5
+    archetype:     String,   // FDE / SA / PM / LLMOps / Agentic / Transformation
+    summary:       String,
+    cvGaps:        [String],
+    topCvChanges:  [String],
+    salaryRange:   String,
+    interviewQs:   [String],
+    generatedAt:   Date,
+  },
+
+  // ── Interview prep / story bank ───────────────────────────────────
+  interviewPrep: {
+    questions:   [{ question: String, starHint: String }],
+    generatedAt: Date,
+  },
 }, { timestamps: true });
 
 jobSchema.index({ userId: 1, createdAt:   -1 });

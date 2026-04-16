@@ -1,15 +1,15 @@
-const axios = require('axios');
+const axios  = require('axios');
+const logger = require('../../config/logger');
 
 // Recruitee ATS — direct job listings from EU & global companies
 // Completely FREE — no API key required (public offers API)
-// Covers: Adyen, Booking.com, Takeaway, MessageBird, Mollie, etc.
 
 const COMPANIES = [
-  'adyen', 'mollie', 'messagebird', 'takeaway', 'picnic',
-  'bynder', 'sendcloud', 'swapfiets', 'mews', 'productboard',
-  'kiwi-com', 'apify', 'rossum', 'rohlik', 'mall-group',
-  'paxful', 'lokalise', 'printify', 'devexperts', 'epam',
-  'grammarly', 'gitlab', 'preply', 'liqpay', 'cossack-labs',
+  // Verified active on Recruitee (checked April 2026)
+  'mollie', 'sendcloud', 'bynder', 'picnic', 'swapfiets',
+  'mews', 'productboard', 'apify', 'rossum', 'lokalise',
+  'printify', 'kiwi-com', 'rohlik', 'grammarly', 'preply',
+  'epam', 'devexperts', 'paxful', 'cossack-labs', 'mall-group',
 ];
 
 const fetchCompany = async (company, roleKeyword) => {
@@ -19,8 +19,10 @@ const fetchCompany = async (company, roleKeyword) => {
       { timeout: 8000 }
     );
 
+    if (!data?.offers) return [];
+
     const kw = (roleKeyword || '').toLowerCase();
-    return (data?.offers || [])
+    return data.offers
       .filter(j => !kw || (j.title || '').toLowerCase().includes(kw))
       .map(j => ({
         externalId:  String(j.id    || ''),
@@ -41,13 +43,14 @@ const fetchCompany = async (company, roleKeyword) => {
 };
 
 const search = async ({ role }) => {
-  const batches = [];
+  const all = [];
   for (let i = 0; i < COMPANIES.length; i += 6) {
-    const batch = COMPANIES.slice(i, i + 6);
+    const batch   = COMPANIES.slice(i, i + 6);
     const results = await Promise.all(batch.map(c => fetchCompany(c, role)));
-    batches.push(...results.flat());
+    all.push(...results.flat());
   }
-  return batches;
+  logger.info(`[recruitee] found ${all.length} jobs`);
+  return all;
 };
 
 module.exports = { search };

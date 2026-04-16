@@ -80,6 +80,12 @@ const search = async ({ role, location, workType, skills = [], experience = 0 })
       timeout: 12000,
     });
 
+    // Guard: LinkedIn sometimes returns a redirect or error page
+    if (typeof data !== 'string' || data.length < 500) {
+      logger.warn('[linkedin-rss] unexpected short response — skipping');
+      return [];
+    }
+
     const $    = cheerio.load(data);
     const jobs = [];
 

@@ -1,15 +1,15 @@
-const axios = require('axios');
+const axios  = require('axios');
+const logger = require('../../config/logger');
 
 // Ashby ATS — direct job listings from modern high-growth companies
 // Completely FREE — no API key required (public posting API)
-// Covers: Ramp, Watershed, Temporal, Supabase, PlanetScale, etc.
 
 const COMPANIES = [
-  'ramp', 'watershed', 'temporal', 'supabase', 'planetscale',
-  'turso', 'neon', 'clerk', 'resend', 'inngest',
-  'trigger', 'stytch', 'workos', 'propelauth', 'zitadel',
-  'highlight', 'axiom', 'betterstack', 'grafbase', 'wundergraph',
-  'speakeasy', 'fern', 'mintlify', 'readme', 'stoplight',
+  'supabase', 'clerk', 'resend', 'inngest', 'trigger',
+  'stytch', 'workos', 'highlight', 'axiom', 'betterstack',
+  'speakeasy', 'mintlify', 'readme', 'watershed', 'temporal',
+  'neon', 'turso', 'propelauth', 'grafbase', 'fern',
+  'mercury', 'ramp', 'wundergraph', 'stoplight', 'zitadel',
 ];
 
 const fetchCompany = async (company, roleKeyword) => {
@@ -17,11 +17,17 @@ const fetchCompany = async (company, roleKeyword) => {
     const { data } = await axios.post(
       `https://api.ashbyhq.com/posting-api/job-board/${company}`,
       {},
-      { timeout: 8000 }
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 8000,
+      }
     );
 
+    // Guard against unexpected responses
+    if (!data || !Array.isArray(data.jobPostings)) return [];
+
     const kw = (roleKeyword || '').toLowerCase();
-    return (data?.jobPostings || [])
+    return data.jobPostings
       .filter(j => !kw || (j.title || '').toLowerCase().includes(kw))
       .map(j => ({
         externalId:  j.id               || '',
@@ -44,13 +50,14 @@ const fetchCompany = async (company, roleKeyword) => {
 };
 
 const search = async ({ role }) => {
-  const batches = [];
+  const all = [];
   for (let i = 0; i < COMPANIES.length; i += 6) {
-    const batch = COMPANIES.slice(i, i + 6);
+    const batch   = COMPANIES.slice(i, i + 6);
     const results = await Promise.all(batch.map(c => fetchCompany(c, role)));
-    batches.push(...results.flat());
+    all.push(...results.flat());
   }
-  return batches;
+  logger.info(`[ashby] found ${all.length} jobs`);
+  return all;
 };
 
 module.exports = { search };

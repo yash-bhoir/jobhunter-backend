@@ -1,6 +1,7 @@
 const axios = require('axios');
 
 const search = async ({ role, location, workType, skills = [] }) => {
+  if (!process.env.RAPIDAPI_KEY) return [];
   // Build an enriched query: include top skills so JSearch's ranker
   // returns results that actually mention the user's tech stack.
   const topSkills   = skills.slice(0, 4).join(' ');

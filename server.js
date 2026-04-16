@@ -55,7 +55,7 @@ async function startServer() {
       }
 
       try {
-        const { startJobMaintenanceScheduler } = require('./src/services/jobs/maintenance.service');
+        const { startJobMaintenanceScheduler } = require('./src/crons/jobMaintenance.cron');
         startJobMaintenanceScheduler();
         logger.info('Job maintenance scheduler started (leader instance)');
       } catch (err) {
