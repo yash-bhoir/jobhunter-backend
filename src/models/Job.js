@@ -23,12 +23,46 @@ const jobSchema = new mongoose.Schema({
   statusUpdatedAt: Date,
   notes:           String,
   appliedAt:       Date,
-  recruiterName:       String,
-  recruiterEmail:      String,
-  recruiterConfidence: Number,
-  recruiterSource:     String,
-  recruiterLinkedIn:   String,
-  careerPageUrl:       String,
+  recruiterName:        String,
+  recruiterEmail:       String,
+  recruiterConfidence:  Number,
+  recruiterSource:      String,
+  recruiterLinkedIn:    String,
+  recruiterEmailStatus: { type: String, enum: ['verified', 'predicted', 'invalid', 'unknown'], default: 'unknown' },
+
+  // All HR contacts (multi-email support)
+  allRecruiterContacts: [{
+    email:      String,
+    name:       String,
+    title:      String,
+    confidence: Number,
+    source:     String,
+    status:     { type: String, enum: ['verified', 'predicted', 'invalid', 'unknown'], default: 'unknown' },
+    linkedin:   String,
+  }],
+
+  // Employees found via Apollo
+  employees: [{
+    name:     String,
+    title:    String,
+    email:    String,
+    linkedin: String,
+    source:   { type: String, default: 'apollo' },
+    foundAt:  { type: Date, default: Date.now },
+  }],
+
+  careerPageUrl:  String,
+  linkedinUrl:    String,
+  employeeSearch: String,
+
+  // ── Global store refs (populated after ingest) ────────────────
+  companyId:   { type: mongoose.Types.ObjectId, ref: 'Company',   default: null },
+  globalJobId: { type: mongoose.Types.ObjectId, ref: 'GlobalJob', default: null },
+
+  // Geo data for radius-based search
+  geoLocation: { lat: Number, lng: Number },
+  distanceKm:  { type: Number, default: null },
+
   postedAt: Date,
   expired:   { type: Boolean, default: false },
   expiredAt: Date,
@@ -43,6 +77,7 @@ jobSchema.index({ userId: 1, searchId:     1 });
 jobSchema.index({ searchId: 1, recruiterEmail: 1 });
 // Added for recruiter history — jobs with emails
 jobSchema.index({ userId: 1, recruiterEmail: 1, createdAt: -1 });
+jobSchema.index({ userId: 1, company: 1 });
 // TTL-friendly: mark expired jobs in maintenance
 jobSchema.index({ expired: 1, createdAt: 1 });
 

@@ -29,6 +29,8 @@ const searchPeople = async (company, titles = ['HR Manager', 'Recruiter', 'Talen
       linkedin:   p.linkedin_url || null,
       confidence: p.email ? 85   : 0,
       source:     'apollo',
+      // Apollo returns real email addresses from their database → verified
+      status:     p.email ? 'verified' : 'unknown',
     }));
   } catch (err) {
     // Apollo free plan has strict limits — return empty instead of crashing

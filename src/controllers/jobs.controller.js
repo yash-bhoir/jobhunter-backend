@@ -1,6 +1,7 @@
 const Job  = require('../models/Job');
 const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
+const { getCompanyContext } = require('../services/companyStore.service');
 
 // ── Get all jobs ──────────────────────────────────────────────────
 exports.getJobs = async (req, res, next) => {
@@ -57,15 +58,30 @@ exports.getSavedJobs = async (req, res, next) => {
   }
 };
 
-// ── Get single job ────────────────────────────────────────────────
+// ── Get single job (with full company context) ────────────────────
 exports.getJob = async (req, res, next) => {
   try {
     const job = await Job.findOne({
       _id:    req.params.id,
       userId: req.user._id,
-    });
+    }).lean();
     if (!job) throw new NotFoundError('Job not found');
-    return success(res, job);
+
+    // Attach all recruiters + employees from global store if company is linked
+    let companyContext = null;
+    if (job.companyId) {
+      companyContext = await getCompanyContext(job.companyId, {
+        recruiterLimit: 20,
+        employeeLimit:  10,
+      });
+    }
+
+    return success(res, {
+      ...job,
+      companyData:  companyContext?.company   || null,
+      recruiters:   companyContext?.recruiters || [],
+      employees:    companyContext?.employees  || [],
+    });
   } catch (err) {
     next(err);
   }
@@ -234,11 +250,73 @@ exports.getCompanyResearch = async (req, res, next) => {
 
     const { researchCompany } = require('../services/ai/jobAnalyzer.service');
     const { extractDomain }   = require('../services/emailFinder/pattern.service');
+    const Company             = require('../models/Company');
 
-    const domain   = extractDomain(job.company);
+    // Prefer real domain from Company store, fall back to guessed domain
+    let domain = null;
+    if (job.companyId) {
+      const company = await Company.findById(job.companyId).select('domain').lean();
+      domain = company?.domain || null;
+    }
+    if (!domain) domain = extractDomain(job.company);
+
     const research = await researchCompany({ company: job.company, domain });
 
     return success(res, research);
+  } catch (err) { next(err); }
+};
+
+// ── Find employees for a job via Apollo ──────────────────────────
+exports.findJobEmployees = async (req, res, next) => {
+  try {
+    const job = await Job.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!job) throw new NotFoundError('Job not found');
+
+    const apollo  = require('../services/emailFinder/apollo.service');
+    const titles  = ['HR Manager', 'Recruiter', 'Talent Acquisition', 'Engineering Manager', 'Tech Lead'];
+    const people  = await apollo.searchPeople(job.company, titles);
+
+    // Persist employees to the job document
+    if (people.length > 0) {
+      job.employees = people.map(p => ({
+        name:     p.name,
+        title:    p.title,
+        email:    p.email || null,
+        linkedin: p.linkedin || null,
+        source:   'apollo',
+        foundAt:  new Date(),
+      }));
+      await job.save();
+    }
+
+    return success(res, {
+      company:   job.company,
+      employees: job.employees,
+      total:     job.employees.length,
+    });
+  } catch (err) { next(err); }
+};
+
+// ── Get all contacts for a job (HR + employees) ───────────────────
+exports.getJobContacts = async (req, res, next) => {
+  try {
+    const job = await Job.findOne({ _id: req.params.id, userId: req.user._id })
+      .select('company recruiterEmail recruiterName recruiterConfidence recruiterSource recruiterLinkedIn recruiterEmailStatus allRecruiterContacts employees careerPageUrl linkedinUrl employeeSearch')
+      .lean();
+    if (!job) throw new NotFoundError('Job not found');
+
+    return success(res, {
+      company:         job.company,
+      hrContacts:      job.allRecruiterContacts?.length > 0
+        ? job.allRecruiterContacts
+        : job.recruiterEmail
+          ? [{ email: job.recruiterEmail, name: job.recruiterName, confidence: job.recruiterConfidence, source: job.recruiterSource, status: job.recruiterEmailStatus, linkedin: job.recruiterLinkedIn }]
+          : [],
+      employees:       job.employees || [],
+      careerPageUrl:   job.careerPageUrl,
+      linkedinUrl:     job.linkedinUrl,
+      employeeSearch:  job.employeeSearch,
+    });
   } catch (err) { next(err); }
 };
 

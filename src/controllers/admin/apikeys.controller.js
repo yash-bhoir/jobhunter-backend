@@ -1,5 +1,26 @@
+const fs   = require('fs');
+const path = require('path');
 const { success } = require('../../utils/response.util');
 const AdminAuditLog = require('../../models/AdminAuditLog');
+
+const ENV_PATH = path.resolve(__dirname, '../../../.env');
+
+// Read .env, update or insert a key, write back
+const persistToEnvFile = (key, value) => {
+  try {
+    let content = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8') : '';
+    const regex = new RegExp(`^${key}=.*$`, 'm');
+    if (regex.test(content)) {
+      content = content.replace(regex, `${key}=${value}`);
+    } else {
+      content = content.trimEnd() + `\n${key}=${value}\n`;
+    }
+    fs.writeFileSync(ENV_PATH, content, 'utf8');
+  } catch (err) {
+    // Non-fatal — key is still set in process.env for this session
+    console.warn(`[apikeys] Could not write to .env: ${err.message}`);
+  }
+};
 
 const API_KEYS = [
   // ── Existing search platforms ────────────────────────────────────
@@ -11,6 +32,10 @@ const API_KEYS = [
     note: 'Enable platform "serpapi" in Platform Config after adding key. ~$50/mo for 5000 searches.' },
   { key: 'REED_API_KEY',            label: 'Reed.co.uk',                         category: 'search', paid: true,
     note: 'Enable platform "reed" in Platform Config after adding key. Free tier: 100 calls/day.' },
+  { key: 'JOOBLE_API_KEY',          label: 'Jooble (Global Aggregator)',          category: 'search', paid: false,
+    note: 'Free tier available. Get key at jooble.org/api/about — then enable platform "jooble" in Platform Config.' },
+  { key: 'FINDWORK_API_KEY',        label: 'Findwork.dev (Tech Jobs)',            category: 'search', paid: false,
+    note: 'Free API. Get key at findwork.dev — then enable platform "findwork" in Platform Config.' },
   // ── Email finders ────────────────────────────────────────────────
   { key: 'HUNTER_API_KEY',          label: 'Hunter.io',                          category: 'email',  paid: true  },
   { key: 'APOLLO_API_KEY',          label: 'Apollo.io',                          category: 'email',  paid: true  },
@@ -102,8 +127,10 @@ exports.update = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Unknown API key' });
     }
 
-    // Update in process.env (runtime only — persists until restart)
+    // Update in process.env immediately (runtime)
     process.env[req.params.key] = value;
+    // Persist to .env file so the key survives server restarts
+    persistToEnvFile(req.params.key, value);
 
     await AdminAuditLog.create({
       adminId:    req.user._id,

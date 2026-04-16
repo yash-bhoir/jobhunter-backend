@@ -140,57 +140,119 @@ Return JSON only:
   }
 };
 
+// ── Glassdoor data via SerpAPI ────────────────────────────────────
+// Returns real rating + review count from Glassdoor if SERPAPI_KEY is set.
+// Uses a single search call — employer search includes overall_rating directly.
+const fetchGlassdoorData = async (company) => {
+  const apiKey = process.env.SERPAPI_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const axios = require('axios');
+    const { data } = await axios.get('https://serpapi.com/search', {
+      params: {
+        engine:   'glassdoor',
+        q:        company,
+        type:     'employer',
+        api_key:  apiKey,
+      },
+      timeout: 8000,
+    });
+
+    // SerpAPI Glassdoor employer search returns an employers array.
+    // Each entry has: id, name, overall_rating, reviews_count, recommend_to_friend, ceo_approval_rate
+    const employer = data?.employers?.[0];
+    if (!employer) return null;
+
+    const employerId = employer.id;
+
+    return {
+      glassdoorRating:      employer.overall_rating        || null,
+      glassdoorReviewCount: employer.reviews_count         || null,
+      glassdoorCeoApproval: employer.ceo_approval_rate     || null,
+      glassdoorRecommend:   employer.recommend_to_friend   || null,
+      // Direct link to the company's Glassdoor overview page
+      glassdoorUrl: employerId
+        ? `https://www.glassdoor.com/Overview/Working-at-${encodeURIComponent(employer.name || company)}-EI_IE${employerId}.htm`
+        : null,
+      realData: true,
+    };
+  } catch (err) {
+    logger.warn(`[JobAnalyzer] Glassdoor fetch failed for ${company}: ${err.message}`);
+    return null;
+  }
+};
+
 // ── Company research ──────────────────────────────────────────────
+// Real Glassdoor data (SerpAPI) + AI for description/techStack/pros/cons.
 // Cache: MD5(company name) — TTL 7 days. Company info is stable.
 const researchCompany = async ({ company, domain }) => {
   const ck     = `ai:company:${crypto.createHash('md5').update(company.toLowerCase()).digest('hex')}`;
   const cached = await cacheGet(ck);
   if (cached) { logger.info(`[JobAnalyzer] companyResearch cache hit: ${company}`); return cached; }
 
-  if (!process.env.OPENAI_API_KEY) return null;
+  // Always build Glassdoor search URL (works without API key)
+  const glassdoorSearchUrl = `https://www.glassdoor.com/Search/results.htm?keyword=${encodeURIComponent(company)}`;
+  const linkedinUrl        = `https://www.linkedin.com/company/${encodeURIComponent(company.toLowerCase().replace(/\s+/g, '-'))}/`;
+  const crunchbaseUrl      = `https://www.crunchbase.com/search/organizations/field/organizations/short_description/${encodeURIComponent(company)}`;
 
-  const client = getClient();
+  // Fetch real Glassdoor data in parallel with AI
+  const [glassdoorData, aiResult] = await Promise.all([
+    fetchGlassdoorData(company),
+    (async () => {
+      if (!process.env.OPENAI_API_KEY) return null;
+      const client = getClient();
+      const prompt = `Give me a factual company overview for "${company}" (domain: ${domain || 'unknown'}).
+Only include information you are confident is accurate. Do NOT invent ratings, salaries, or funding stages.
 
-  const prompt = `Give me a brief company overview for "${company}" (domain: ${domain || 'unknown'}).
-
-Return JSON only:
+Return JSON only — set any field to null if you are not confident:
 {
-  "name": "${company}",
-  "description": "What the company does in 2 sentences",
-  "industry": "Technology",
-  "size": "1000-5000 employees",
-  "founded": "2010",
-  "headquarters": "Bangalore, India",
-  "type": "Private/Public/Startup",
-  "glassdoorRating": 4.2,
-  "cultureHighlights": ["Good work-life balance", "Learning opportunities"],
-  "techStack": ["React", "Node.js", "AWS"],
-  "fundingStage": "Series C / Listed / Bootstrapped",
-  "pros": ["pro1", "pro2"],
-  "cons": ["con1", "con2"],
-  "interviewProcess": "Brief description of their interview process",
-  "avgSalary": "₹8-20 LPA for tech roles"
+  "description": "What the company does in 2-3 sentences (factual)",
+  "industry": "e.g. Technology / Finance / Healthcare",
+  "size": "e.g. 1,000–5,000 employees OR null",
+  "founded": "year as string OR null",
+  "headquarters": "City, Country OR null",
+  "type": "Public / Private / Startup OR null",
+  "techStack": ["only include if clearly known from public info, else []"],
+  "pros": ["2-3 commonly cited pros from employee reviews if known, else []"],
+  "cons": ["2-3 commonly cited cons from employee reviews if known, else []"],
+  "interviewProcess": "Brief description if commonly known, else null"
 }`;
 
-  try {
-    const response = await client.chat.completions.create({
-      model:       'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: 'You are a company research assistant. Return valid JSON only. Use your knowledge.' },
-        { role: 'user',   content: prompt },
-      ],
-      max_tokens:  600,
-      temperature: 0.2,
-    });
+      try {
+        const response = await client.chat.completions.create({
+          model:       'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: 'You are a factual company research assistant. Return valid JSON only. Never invent numbers — set unknown fields to null.' },
+            { role: 'user',   content: prompt },
+          ],
+          max_tokens:  500,
+          temperature: 0.1,
+        });
+        const raw = response.choices[0].message.content.replace(/```json|```/g, '').trim();
+        return JSON.parse(raw);
+      } catch (err) {
+        logger.warn(`AI company research failed for ${company}: ${err.message}`);
+        return null;
+      }
+    })(),
+  ]);
 
-    const raw    = response.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const result = JSON.parse(raw);
-    await cacheSet(ck, result, 7 * 24 * 3600); // 7 days — company info rarely changes
-    return result;
-  } catch (err) {
-    logger.warn(`Company research failed for ${company}: ${err.message}`);
-    return null;
-  }
+  const result = {
+    name:   company,
+    // AI-sourced fields (labeled so frontend can show disclaimer)
+    ...(aiResult || {}),
+    aiGenerated: true,
+    // Real links — always present
+    glassdoorSearchUrl,
+    linkedinUrl,
+    crunchbaseUrl,
+    // Real Glassdoor data — overrides AI if available
+    ...(glassdoorData || {}),
+  };
+
+  await cacheSet(ck, result, 7 * 24 * 3600); // 7-day cache
+  return result;
 };
 
 // ── Fallback explanation ──────────────────────────────────────────

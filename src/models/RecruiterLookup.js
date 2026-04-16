@@ -12,6 +12,7 @@ const recruiterLookupSchema = new mongoose.Schema({
   confidence: { type: Number },
   linkedin:   { type: String },
   title:      { type: String },
+  status:     { type: String, enum: ['verified', 'predicted', 'invalid', 'unknown'], default: 'unknown' },
 
   // All contacts returned
   allEmails: [
@@ -21,6 +22,8 @@ const recruiterLookupSchema = new mongoose.Schema({
       confidence: Number,
       linkedin:   String,
       title:      String,
+      source:     String,
+      status:     { type: String, enum: ['verified', 'predicted', 'invalid', 'unknown'], default: 'unknown' },
     },
   ],
 
