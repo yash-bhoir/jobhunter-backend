@@ -29,6 +29,14 @@ router.post('/login',
   ctrl.login
 );
 
+router.post('/admin/verify-otp',
+  authLimiter,
+  body('userId').notEmpty().withMessage('userId required'),
+  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
+  validate,
+  ctrl.verifyAdminOtp
+);
+
 router.post('/refresh',       ctrl.refresh);
 router.get ('/verify-email',  ctrl.verifyEmail);
 router.post('/forgot-password',

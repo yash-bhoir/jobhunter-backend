@@ -116,6 +116,40 @@ exports.login = async (req, res, next) => {
       throw new AuthError('Please verify your email before logging in');
     }
 
+    // ── Admin 2-FA: send OTP instead of issuing tokens directly ──
+    if (['admin', 'super_admin'].includes(user.role)) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+      user.adminOtpCode    = otp;
+      user.adminOtpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+      user.loginAttempts   = 0;
+      user.lockUntil       = undefined;
+      await user.save();
+
+      try {
+        const emailContent = templates.adminOtp(
+          user.profile?.firstName || 'Admin',
+          otp,
+        );
+        // Send to the admin's registered email
+        await sendEmail({ to: user.email, ...emailContent });
+        // Also send to the owner's personal security email if configured
+        const securityEmail = process.env.ADMIN_SECURITY_EMAIL;
+        if (securityEmail && securityEmail !== user.email) {
+          await sendEmail({ to: securityEmail, ...emailContent }).catch(() => {});
+        }
+        logger.info(`Admin OTP sent to ${email}`);
+      } catch (emailErr) {
+        logger.error(`Admin OTP email failed for ${email}: ${emailErr.message}`);
+        throw new AuthError('Failed to send verification code. Please try again.');
+      }
+
+      return success(res, {
+        otpRequired: true,
+        userId:      user._id.toString(),
+      }, 'Verification code sent to your email');
+    }
+
     // Reset failed attempts
     user.loginAttempts = 0;
     user.lockUntil     = undefined;
@@ -308,6 +342,59 @@ exports.googleAuth = (req, res, next) => {
     scope: ['profile', 'email'],
     session: false,
   })(req, res, next);
+};
+
+// ── Verify Admin OTP ──────────────────────────────────────────────
+exports.verifyAdminOtp = async (req, res, next) => {
+  try {
+    const { userId, otp } = req.body;
+    if (!userId || !otp) throw new ValidationError('userId and otp are required');
+
+    const user = await User.findById(userId).select('+adminOtpCode +adminOtpExpires');
+    if (!user) throw new AuthError('Invalid request');
+
+    if (
+      !user.adminOtpCode ||
+      !user.adminOtpExpires ||
+      user.adminOtpExpires < Date.now()
+    ) {
+      throw new AuthError('Verification code has expired. Please log in again.');
+    }
+
+    if (user.adminOtpCode !== otp.trim()) {
+      throw new AuthError('Incorrect verification code');
+    }
+
+    // Clear OTP and complete login
+    user.adminOtpCode    = undefined;
+    user.adminOtpExpires = undefined;
+    user.lastLoginAt     = new Date();
+    user.status          = 'active';
+    await user.save();
+
+    const tokens = generateTokens({
+      id:   user._id,
+      role: user.role,
+      plan: user.plan,
+    });
+
+    res.cookie('refreshToken', tokens.refreshToken, {
+      httpOnly: true,
+      secure:   process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge:   30 * 24 * 60 * 60 * 1000,
+    });
+
+    logger.info(`Admin verified OTP and logged in: ${user.email}`);
+
+    return success(res, {
+      accessToken: tokens.accessToken,
+      user:        user.toSafeObject(),
+    }, 'Login successful');
+
+  } catch (err) {
+    next(err);
+  }
 };
 
 exports.googleCallback = (req, res, next) => {

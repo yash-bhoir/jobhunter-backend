@@ -76,8 +76,13 @@ const userSchema = new mongoose.Schema({
   emailVerifyExpires:   { type: Date,    select: false },
   passwordResetToken:   { type: String,  select: false },
   passwordResetExpires: { type: Date,    select: false },
-  loginAttempts:        { type: Number,  default: 0 },
-  lockUntil:            Date,
+
+  // Admin 2-FA OTP — email-based, required on every admin/super_admin login
+  adminOtpCode:    { type: String, select: false },
+  adminOtpExpires: { type: Date,   select: false },
+
+  loginAttempts: { type: Number, default: 0 },
+  lockUntil:     Date,
 
   lastLoginAt:  Date,
   lastActiveAt: Date,

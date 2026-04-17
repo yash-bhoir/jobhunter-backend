@@ -129,6 +129,36 @@ const templates = {
     };
   },
 
+  adminOtp: (name, otp) => ({
+    subject: 'JobHunter Admin — Your login verification code',
+    html: `
+      <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;background:#f8fafc">
+        <div style="background:white;border-radius:16px;padding:32px;box-shadow:0 1px 8px rgba(0,0,0,0.06)">
+          <div style="text-align:center;margin-bottom:28px">
+            <div style="width:52px;height:52px;background:#1e40af;border-radius:14px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:14px">
+              <span style="color:white;font-size:26px">🔐</span>
+            </div>
+            <h1 style="margin:0;font-size:22px;font-weight:800;color:#1e293b">Admin Login Verification</h1>
+            <p style="margin:8px 0 0;color:#64748b;font-size:14px">Hi ${name}, use the code below to complete your login</p>
+          </div>
+
+          <div style="background:#f1f5f9;border-radius:12px;padding:24px;text-align:center;margin-bottom:24px">
+            <p style="margin:0 0 8px;font-size:12px;font-weight:600;color:#64748b;letter-spacing:1px;text-transform:uppercase">Verification Code</p>
+            <p style="margin:0;font-size:42px;font-weight:800;color:#1e40af;letter-spacing:10px">${otp}</p>
+          </div>
+
+          <p style="color:#64748b;font-size:13px;text-align:center;margin:0">
+            This code expires in <strong>10 minutes</strong>.<br>
+            If you did not attempt to log in, your password may be compromised — change it immediately.
+          </p>
+        </div>
+        <p style="color:#94a3b8;font-size:11px;text-align:center;margin-top:16px">
+          JobHunter Admin Portal · Do not share this code with anyone
+        </p>
+      </div>
+    `,
+  }),
+
   lowCredits: (name, remaining) => ({
     subject: 'Your JobHunter credits are running low',
     html: `
