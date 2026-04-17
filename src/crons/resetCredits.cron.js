@@ -28,6 +28,10 @@ const startCreditResetScheduler = () => {
             totalCredits = user.planOverrides.creditsPerMonth;
           }
 
+          const nextReset = new Date();
+          nextReset.setMonth(nextReset.getMonth() + 1, 1);
+          nextReset.setHours(0, 0, 0, 0);
+
           await UserCredits.findOneAndUpdate(
             { userId: user._id },
             {
@@ -42,10 +46,13 @@ const startCreditResetScheduler = () => {
                 'breakdown.emailsSent':   0,
                 'breakdown.resumeParses': 0,
                 'breakdown.exports':      0,
-                lastResetAt: new Date(),
-                resetDate:   new Date(),
+                lastResetAt:  new Date(),
+                resetDate:    nextReset,
+                // Clear grace flag so mid-month auto-reload can fire again next cycle
+                graceGiven:   false,
+                graceGivenAt: null,
               },
-              // topupCredits are intentionally NOT reset — user paid for them
+              // topupCredits intentionally NOT reset — user paid for them
             },
             { upsert: true, new: true }
           );

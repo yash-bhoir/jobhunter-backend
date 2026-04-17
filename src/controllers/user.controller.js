@@ -23,12 +23,19 @@ exports.getCredits = async (req, res, next) => {
     let credits = await UserCredits.findOne({ userId: req.user._id });
 
     if (!credits) {
+      const { PLAN_CREDITS } = require('../utils/constants');
       credits = await UserCredits.create({
         userId:       req.user._id,
         plan:         req.user.plan || 'free',
-        totalCredits: 100,
+        totalCredits: PLAN_CREDITS[req.user.plan || 'free'] ?? 100,
         resetDate:    getNextMonthReset(),
+        lastResetAt:  new Date(),
       });
+    } else if (!credits.resetDate) {
+      // Back-fill missing resetDate on old records
+      const nextReset = getNextMonthReset();
+      await UserCredits.findByIdAndUpdate(credits._id, { $set: { resetDate: nextReset } });
+      credits.resetDate = nextReset;
     }
 
     return success(res, {
@@ -40,6 +47,9 @@ exports.getCredits = async (req, res, next) => {
       usagePct:     credits.usagePct,
       breakdown:    credits.breakdown,
       resetDate:    credits.resetDate,
+      lastResetAt:  credits.lastResetAt,
+      graceGiven:   credits.graceGiven   || false,
+      graceGivenAt: credits.graceGivenAt || null,
     });
   } catch (err) {
     next(err);

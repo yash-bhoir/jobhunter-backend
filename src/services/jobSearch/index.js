@@ -2,6 +2,10 @@ const logger         = require('../../config/logger');
 const { score }       = require('./scorer');
 const { deduplicate } = require('./deduplicator');
 const { normalize }   = require('./normalizer');
+const {
+  findOrCreateCompany,
+  ingestJob,
+}                     = require('../companyStore.service');
 
 // ── All platform services ─────────────────────────────────────────
 const SERVICES = {
@@ -20,6 +24,14 @@ const SERVICES = {
   'indeed-rss':   require('./indeed-rss.service'),
   naukri:         require('./naukri.service'),
   wellfound:      require('./wellfound.service'),
+  // ── New aggregators (require API keys, admin-controlled) ─────────
+  jooble:         require('./jooble.service'),     // Global aggregator  — needs JOOBLE_API_KEY
+  findwork:       require('./findwork.service'),   // Tech jobs          — needs FINDWORK_API_KEY
+  // ── ATS direct listings (FREE — no API key needed) ───────────────
+  greenhouse:     require('./greenhouse.service'), // Big Tech (Stripe, Airbnb, Coinbase…)
+  lever:          require('./lever.service'),      // Startups (Figma, Vercel, Notion…)
+  ashby:          require('./ashby.service'),      // High-growth (Ramp, Supabase, Clerk…)
+  recruitee:      require('./recruitee.service'), // EU companies (Adyen, Mollie, Mews…)
   // ── Paid platforms (admin-controlled, disabled by default) ──────
   serpapi:        require('./serpapi.service'),   // Google Jobs — needs SERPAPI_KEY
   reed:           require('./reed.service'),       // Reed.co.uk   — needs REED_API_KEY
@@ -41,8 +53,17 @@ const PLATFORM_META = {
   'indeed-rss':   { type: 'free', defaultEnabled: true  },
   naukri:         { type: 'free', defaultEnabled: true  },
   wellfound:      { type: 'free', defaultEnabled: true  },
-  serpapi:        { type: 'paid', defaultEnabled: false }, // admin must enable + add SERPAPI_KEY
-  reed:           { type: 'paid', defaultEnabled: false }, // admin must enable + add REED_API_KEY
+  // ── New aggregators ──────────────────────────────────────────────
+  jooble:         { type: 'paid', defaultEnabled: true  }, // JOOBLE_API_KEY set
+  findwork:       { type: 'paid', defaultEnabled: true  }, // FINDWORK_API_KEY set
+  // ── ATS free direct listings (on by default) ─────────────────────
+  greenhouse:     { type: 'free', defaultEnabled: true  }, // Big Tech direct listings
+  lever:          { type: 'free', defaultEnabled: true  }, // Startup direct listings
+  ashby:          { type: 'free', defaultEnabled: true  }, // High-growth company listings
+  recruitee:      { type: 'free', defaultEnabled: true  }, // EU company listings
+  // ── Paid platforms ───────────────────────────────────────────────
+  serpapi:        { type: 'paid', defaultEnabled: true  }, // SERPAPI_KEY set
+  reed:           { type: 'paid', defaultEnabled: true  }, // REED_API_KEY set
 };
 
 // ── Circuit breaker — in-memory, resets every 10 minutes ─────────
@@ -71,8 +92,17 @@ const getCache = () => {
   return _cache;
 };
 
-const cacheKey = (name, role, location, workType) =>
-  `platform:${name}:${(role || '').toLowerCase()}:${(location || '').toLowerCase()}:${workType || 'any'}`;
+const cacheKey = (name, role, location, workType, skills = []) => {
+  // Include a short skills fingerprint so skill-enriched queries don't
+  // collide with plain queries in the Redis cache.
+  const skillsTag = skills.length
+    ? require('crypto').createHash('md5')
+        .update([...skills].sort().join(','))
+        .digest('hex')
+        .substring(0, 8)
+    : 'noskills';
+  return `platform:${name}:${(role || '').toLowerCase()}:${(location || '').toLowerCase()}:${workType || 'any'}:${skillsTag}`;
+};
 
 const fromCache = async (key) => {
   try { return await getCache()?.get(key); } catch { return null; }
@@ -110,6 +140,29 @@ const getEnabledPlatforms = async () => {
   }
 };
 
+// ── Global store ingest (runs after search, non-blocking) ─────────
+// For each scored job: find-or-create Company, find-or-create GlobalJob.
+// Mutates job objects in place — adds companyId + globalJobId so the
+// caller (search controller) can persist them on the UserJob record.
+const _ingestIntoGlobalStore = async (jobs) => {
+  for (const job of jobs) {
+    try {
+      const company = await findOrCreateCompany(job.company, {
+        source: job.source,
+      });
+      if (!company) continue;
+
+      const { globalJob } = await ingestJob(job, company._id);
+
+      // Attach IDs so caller can save them to the Job (UserJob) record
+      job.companyId   = company._id;
+      job.globalJobId = globalJob?._id || null;
+    } catch (err) {
+      logger.warn(`[globalStore] ingest failed for "${job.company}": ${err.message}`);
+    }
+  }
+};
+
 // ── Main orchestrator ─────────────────────────────────────────────
 const runJobSearch = async (params, user, plan, onProgress) => {
   const maxJobs = plan === 'free' ? 10 : plan === 'pro' ? 30 : 50;
@@ -125,6 +178,15 @@ const runJobSearch = async (params, user, plan, onProgress) => {
 
   logger.info(`[jobSearch] platforms (${platforms.length}): ${platforms.join(', ')}`);
 
+  // Build profile enrichment — merged skills from profile + resume, deduplicated.
+  // Passed to every platform service so they can tailor queries.
+  const profileSkills = [
+    ...(user?.profile?.skills         || []),
+    ...(user?.resume?.extractedSkills || []),
+  ].map(s => s.trim()).filter(Boolean);
+  const uniqueSkills  = [...new Set(profileSkills)];
+  const experience    = user?.profile?.experience || 0;
+
   // Run all platforms concurrently — skip circuit-broken ones
   const promises = platforms.map(async (name) => {
     // Circuit breaker check
@@ -134,8 +196,8 @@ const runJobSearch = async (params, user, plan, onProgress) => {
       return { name, jobs: [], error: 'circuit_open' };
     }
 
-    // Redis cache check
-    const ck     = cacheKey(name, params.role, params.location, params.workType);
+    // Redis cache check (keyed by skills fingerprint so enriched queries stay separate)
+    const ck     = cacheKey(name, params.role, params.location, params.workType, uniqueSkills);
     const cached = await fromCache(ck);
     if (cached) {
       logger.info(`[${name}] cache hit (${cached.length} jobs)`);
@@ -144,7 +206,10 @@ const runJobSearch = async (params, user, plan, onProgress) => {
       return { name, jobs: cached, error: null };
     }
 
-    return SERVICES[name].search(params)
+    // Enrich params with user profile so services can build better queries
+    const enrichedParams = { ...params, skills: uniqueSkills, experience };
+
+    return SERVICES[name].search(enrichedParams)
       .then(async (jobs) => {
         logger.info(`[${name}] found ${jobs.length} jobs`);
         if (onProgress) onProgress({ platform: name, found: jobs.length, status: 'done' });

@@ -71,14 +71,26 @@ exports.verifyPayment = async (req, res, next) => {
     await User.findByIdAndUpdate(req.user._id, { plan });
     invalidateUserCache(req.user._id);
 
-    // Update credits
+    // Update credits — reset everything cleanly on upgrade
     await UserCredits.findOneAndUpdate(
       { userId: req.user._id },
       {
-        plan,
-        totalCredits: PLAN_CREDITS[plan],
-        usedCredits:  0,
-        resetDate:    getNextMonthReset(),
+        $set: {
+          plan,
+          totalCredits: PLAN_CREDITS[plan],
+          usedCredits:  0,
+          resetDate:    getNextMonthReset(),
+          lastResetAt:  new Date(),
+          graceGiven:   false,
+          graceGivenAt: null,
+          // Reset all breakdown counters
+          'breakdown.searches':     0,
+          'breakdown.emailLookups': 0,
+          'breakdown.aiEmails':     0,
+          'breakdown.emailsSent':   0,
+          'breakdown.resumeParses': 0,
+          'breakdown.exports':      0,
+        },
       },
       { upsert: true }
     );

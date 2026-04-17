@@ -6,6 +6,35 @@ const crypto  = require('crypto');
 
 const getClient = () => new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// ── ATS-Safe Text Normalization (career-ops inspired) ─────────────
+// Strips Unicode characters that cause mojibake / ATS parsing errors.
+// Runs on HTML before PDF generation so the output is ATS-clean.
+const normalizeTextForATS = (html) => {
+  // Mask <style> and <script> blocks so we don't corrupt CSS/JS
+  const masked  = [];
+  let safeHtml  = html.replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/gi, (match) => {
+    masked.push(match);
+    return `__MASKED_${masked.length - 1}__`;
+  });
+
+  // Normalize body text — these trip up ATS parsers
+  safeHtml = safeHtml
+    .replace(/\u2014/g, '-')           // em-dash → hyphen
+    .replace(/\u2013/g, '-')           // en-dash → hyphen
+    .replace(/[\u201C\u201D]/g, '"')   // smart double quotes → straight
+    .replace(/[\u2018\u2019]/g, "'")   // smart single quotes → straight
+    .replace(/\u2026/g, '...')         // ellipsis → three dots
+    .replace(/\u200B/g, '')            // zero-width space → removed
+    .replace(/\u00A0/g, ' ')           // non-breaking space → regular
+    .replace(/\uFEFF/g, '')            // BOM → removed
+    .replace(/\u2022/g, '-')           // bullet • → hyphen (some ATS hate bullets)
+    .replace(/\u2019/g, "'");          // right single quote → apostrophe
+
+  // Restore masked blocks
+  safeHtml = safeHtml.replace(/__MASKED_(\d+)__/g, (_, i) => masked[parseInt(i)]);
+  return safeHtml;
+};
+
 // ── Cache helpers (Redis, graceful no-op when unavailable) ─────────
 let _cache = null;
 const getCache = () => {
@@ -591,7 +620,9 @@ const optimizeResumeForJob = async ({
   // 3. Build output files
   // PDF: generate formatted PDF from AI-updated text (glyph encoding prevents direct patching)
   logger.info(`[Resume] Generating formatted PDF (${aiResult.updatedResumeText?.length || 0} chars)`);
-  const optimizedPdfBuffer = await generateResumePdf(aiResult.updatedResumeText, userName);
+  // Apply ATS normalization before PDF generation (career-ops inspired)
+  const atsCleanText = normalizeTextForATS(aiResult.updatedResumeText || '');
+  const optimizedPdfBuffer = await generateResumePdf(atsCleanText, userName);
   logger.info(`[Resume] Generated PDF: ${optimizedPdfBuffer.length} bytes`);
 
   // DOCX: if user uploaded a .docx, patch keywords directly in the XML — exact layout preserved
@@ -625,4 +656,5 @@ module.exports = {
   downloadPdfBuffer,
   extractResumeText,
   optimizeResumeForJob,
+  normalizeTextForATS,
 };

@@ -1,14 +1,22 @@
 const axios = require('axios');
 
-const search = async ({ role, location, workType }) => {
-  const query = location ? `${role} in ${location}` : role;
+const search = async ({ role, location, workType, skills = [] }) => {
+  if (!process.env.RAPIDAPI_KEY) return [];
+  // Build an enriched query: include top skills so JSearch's ranker
+  // returns results that actually mention the user's tech stack.
+  const topSkills   = skills.slice(0, 4).join(' ');
+  const roleQuery   = topSkills ? `${role} ${topSkills}` : role;
+  const query       = location ? `${roleQuery} in ${location}` : roleQuery;
+
+  // Map experience to JSearch employment type / date filter
+  // JSearch uses date_posted to trim staleness; keep to 'month' for freshness.
   const { data } = await axios.get('https://jsearch.p.rapidapi.com/search', {
     params: {
       query,
-      page:              '1',
-      num_pages:         '2',
-      date_posted:       'month',
-      remote_jobs_only:  workType === 'remote' ? 'true' : 'false',
+      page:             '1',
+      num_pages:        '2',
+      date_posted:      'month',
+      remote_jobs_only: workType === 'remote' ? 'true' : 'false',
     },
     headers: {
       'X-RapidAPI-Key':  process.env.RAPIDAPI_KEY,

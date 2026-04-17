@@ -14,8 +14,10 @@ const userCreditsSchema = new mongoose.Schema({
     resumeParses: { type: Number, default: 0 },
     exports:      { type: Number, default: 0 },
   },
-  resetDate:   Date,
-  lastResetAt: Date,
+  resetDate:    Date,
+  lastResetAt:  Date,
+  graceGiven:   { type: Boolean, default: false },
+  graceGivenAt: Date,
 }, { timestamps: true });
 
 userCreditsSchema.virtual('remaining').get(function () {

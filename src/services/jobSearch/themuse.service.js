@@ -2,7 +2,7 @@ const axios = require('axios');
 
 const search = async ({ role }) => {
   const { data } = await axios.get('https://www.themuse.com/api/public/jobs', {
-    params:  { role, page: 1 },
+    params:  { name: role, page: 0 },
     timeout: 8000,
   });
 

@@ -55,7 +55,7 @@ async function startServer() {
       }
 
       try {
-        const { startJobMaintenanceScheduler } = require('./src/services/jobs/maintenance.service');
+        const { startJobMaintenanceScheduler } = require('./src/crons/jobMaintenance.cron');
         startJobMaintenanceScheduler();
         logger.info('Job maintenance scheduler started (leader instance)');
       } catch (err) {
@@ -68,6 +68,14 @@ async function startServer() {
         logger.info('Credit reset scheduler started (leader instance)');
       } catch (err) {
         logger.warn('Credit reset scheduler failed to start:', err.message);
+      }
+
+      try {
+        const { startCareerScanner } = require('./src/services/careerScanner/scheduler');
+        startCareerScanner();
+        logger.info('Career page scanner started (leader instance)');
+      } catch (err) {
+        logger.warn('Career scanner failed to start:', err.message);
       }
     } else {
       logger.info(`Instance ${process.env.pm_id} — schedulers skipped (not leader)`);

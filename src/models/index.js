@@ -10,4 +10,9 @@ module.exports = {
   AdminAuditLog:    require('./AdminAuditLog'),
   ActivityLog:      require('./ActivityLog'),
   RecruiterLookup:  require('./RecruiterLookup'),
+  // ── Global shared store ───────────────────────────────────────
+  Company:          require('./Company'),
+  GlobalJob:        require('./GlobalJob'),
+  GlobalRecruiter:  require('./GlobalRecruiter'),
+  GlobalEmployee:   require('./GlobalEmployee'),
 };

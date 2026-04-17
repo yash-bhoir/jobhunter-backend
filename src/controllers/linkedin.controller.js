@@ -498,6 +498,54 @@ exports.fetchFromGmail = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Get alert settings ────────────────────────────────────────────
+exports.getAlertSettings = async (req, res, next) => {
+  try {
+    const User = require('../models/User');
+    const user = await User.findById(req.user._id).select('linkedinAlerts').lean();
+    return success(res, {
+      enabled:    user?.linkedinAlerts?.enabled    ?? true,
+      frequency:  user?.linkedinAlerts?.frequency  ?? 'daily',
+      lastSentAt: user?.linkedinAlerts?.lastSentAt ?? null,
+    });
+  } catch (err) { next(err); }
+};
+
+// ── Update alert settings ─────────────────────────────────────────
+exports.updateAlertSettings = async (req, res, next) => {
+  try {
+    const { enabled, frequency } = req.body;
+    const allowed = ['hourly', 'daily', 'weekly'];
+
+    const update = {};
+    if (typeof enabled === 'boolean')                   update['linkedinAlerts.enabled']   = enabled;
+    if (frequency && allowed.includes(frequency))       update['linkedinAlerts.frequency'] = frequency;
+
+    const User = require('../models/User');
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: update },
+      { new: true, select: 'linkedinAlerts' }
+    );
+
+    return success(res, {
+      enabled:   user.linkedinAlerts.enabled,
+      frequency: user.linkedinAlerts.frequency,
+    }, 'Alert settings saved');
+  } catch (err) { next(err); }
+};
+
+// ── Unread count (badge) ──────────────────────────────────────────
+exports.getUnreadCount = async (req, res, next) => {
+  try {
+    const count = await LinkedInJob.countDocuments({
+      userId: req.user._id,
+      status: 'new',
+    });
+    return success(res, { count });
+  } catch (err) { next(err); }
+};
+
 // ── Disconnect Gmail ──────────────────────────────────────────────
 exports.gmailDisconnect = async (req, res, next) => {
   try {

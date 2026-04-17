@@ -4,6 +4,17 @@ const Job                = require('../models/Job');
 const UserCredits        = require('../models/UserCredits');
 const { runJobSearch }   = require('../services/jobSearch');
 const { findHRContacts } = require('../services/emailFinder');
+const { linkRecruitersToJobs } = require('../services/dataLinker.service');
+const {
+  linkLookupToGlobalStore,
+  linkEmployeesToGlobalStore,
+  isRecruiterDataFresh,
+  getGlobalRecruitersForCompany,
+} = require('../services/dataLinker.service');
+const {
+  findOrCreateCompany,
+  ingestJob,
+}                        = require('../services/companyStore.service');
 const { emitToUser }     = require('../config/socket');
 const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
@@ -71,9 +82,9 @@ exports.runSearch = async (req, res, next) => {
           searchId:          cached._id,
           jobs,
           totalFound:        cached.totalFound,
-          platformBreakdown: cached.platformBreakdown
+          platformBreakdown: cached.platformBreakdown instanceof Map
             ? Object.fromEntries(cached.platformBreakdown)
-            : {},
+            : (cached.platformBreakdown || {}),
           emailsFound:       jobs.filter(j => j.recruiterEmail).length,
           fromCache:         true,
           cachedAt:          cached.createdAt,
@@ -115,19 +126,63 @@ exports.runSearch = async (req, res, next) => {
         req.user, plan, onProgress
       );
     } catch (searchErr) {
+      // Mark search as failed
       await JobSearch.findByIdAndUpdate(jobSearch._id, {
         status: 'failed',
         error:  searchErr.message,
       });
+      // Credits will be auto-refunded by global error handler (5xx path)
       throw searchErr;
+    }
+
+    // Refund if search returned 0 jobs — APIs were reachable but no results
+    if ((!result.jobs || result.jobs.length === 0) && req.creditsDeducted) {
+      await UserCredits.findOneAndUpdate(
+        { userId: req.user._id },
+        { $inc: { usedCredits: -req.creditsDeducted } }
+      ).catch(e => logger.warn(`Zero-result credit refund failed: ${e.message}`));
+      req.creditsDeducted = 0;
     }
 
     const durationMs = Date.now() - startTime;
 
-    // ── Auto find HR emails ───────────────────────────────────────
-    const limit           = plan === 'free' ? 2 : result.jobs.length;
-    const uniqueCompanies = [...new Set(result.jobs.map(j => j.company))].slice(0, limit);
-    const emailMap        = {};
+    const uniqueCompanyNames = [...new Set(result.jobs.map(j => j.company).filter(Boolean))];
+
+    // ── Step 1 & 2: Global store ingest — fully non-blocking ─────
+    // Runs in background after response is sent — never delays the user.
+    const companyIdMap   = {};
+    const globalJobIdMap = {};
+
+    setImmediate(async () => {
+      try {
+        await Promise.all(
+          uniqueCompanyNames.map(async (name) => {
+            const company = await findOrCreateCompany(name, {
+              source: result.jobs.find(j => j.company === name)?.source,
+            });
+            if (!company) return;
+            companyIdMap[name] = company._id;
+            // Ingest jobs for this company
+            const companyJobs = result.jobs.filter(j => j.company === name);
+            await Promise.all(companyJobs.map(async (j) => {
+              const { globalJob } = await ingestJob(j, company._id);
+              if (globalJob) {
+                const key = j.url || j.externalId || `${j.company}|${j.title}`;
+                globalJobIdMap[key] = globalJob._id;
+              }
+            }));
+          })
+        );
+      } catch (err) {
+        logger.warn(`[globalStore] background ingest error: ${err.message}`);
+      }
+    });
+
+    // ── Step 3: Auto find HR emails ───────────────────────────────
+    // Cap at 5 companies max — prevents 30-second Hunter loops
+    const HR_LOOKUP_LIMIT  = plan === 'free' ? 2 : 5;
+    const uniqueCompanies  = uniqueCompanyNames.slice(0, HR_LOOKUP_LIMIT);
+    const emailMap         = {};
 
     emitToUser(req.user._id, 'search:email_finding', {
       status: 'started',
@@ -136,15 +191,58 @@ exports.runSearch = async (req, res, next) => {
 
     for (const company of uniqueCompanies) {
       try {
+        // ── API cost gate: reuse global store if data is fresh ────
+        const fresh = await isRecruiterDataFresh(company);
+        if (fresh) {
+          const cached = await getGlobalRecruitersForCompany(company);
+          if (cached.length > 0) {
+            const top = cached[0];
+            emailMap[company] = {
+              email:    top.email,
+              name:     top.name,
+              confidence: top.confidence,
+              status:   top.status,
+              source:   top.source,
+              contacts: cached.map(r => ({
+                email: r.email, name: r.name, title: r.title,
+                confidence: r.confidence, status: r.status, linkedin: r.linkedin,
+              })),
+            };
+            logger.info(`[search] reused ${cached.length} cached recruiters for "${company}" (saved API call)`);
+            continue;
+          }
+        }
+
+        // ── Fresh API call ────────────────────────────────────────
         const contacts = await findHRContacts(company, plan);
         if (contacts?.emails?.length > 0) {
+          const top = contacts.emails[0];
           emailMap[company] = {
-            email:        contacts.emails[0].email,
-            name:         contacts.emails[0].name,
-            confidence:   contacts.emails[0].confidence,
-            source:       contacts.source,
-            careerPageUrl: contacts.careerPageUrl,
+            email:          top.email,
+            name:           top.name,
+            confidence:     top.confidence,
+            status:         top.status || 'unknown',
+            source:         contacts.source,
+            contacts:       contacts.emails,
+            careerPageUrl:  contacts.careerPageUrl,
+            linkedinUrl:    contacts.linkedinUrl,
+            employeeSearch: contacts.employeeSearch,
           };
+
+          // ── Ingest into global store (saves future API calls) ──
+          const cid = companyIdMap[company];
+          if (cid) {
+            linkLookupToGlobalStore(req.user._id, company, {
+              ...contacts,
+              allEmails: contacts.emails,
+            }, contacts.source).catch(() => {});
+          }
+
+          // ── Ingest employees into GlobalEmployee ──────────────
+          if (contacts.employees?.length) {
+            linkEmployeesToGlobalStore(company, contacts.employees, contacts.source)
+              .catch(() => {});
+          }
         }
       } catch (err) {
         logger.warn(`Auto email find failed for ${company}: ${err.message}`);
@@ -157,34 +255,58 @@ exports.runSearch = async (req, res, next) => {
     });
 
     // ── Save jobs to DB ───────────────────────────────────────────
+    let savedJobIds = [];
     if (result.jobs.length > 0) {
       const jobDocs = result.jobs.map(j => {
-        const hr = emailMap[j.company] || null;
+        const hr         = emailMap[j.company] || null;
+        const topContact = hr?.contacts?.[0]   || null;
+        const globalKey  = j.url || j.externalId || `${j.company}|${j.title}`;
         return {
-          userId:              req.user._id,
-          searchId:            jobSearch._id,
-          externalId:          j.externalId,
-          title:               j.title,
-          company:             j.company,
-          location:            j.location,
-          description:         j.description,
-          url:                 j.url,
-          salary:              j.salary,
-          source:              j.source,
-          remote:              j.remote,
-          matchScore:          j.matchScore,
-          postedAt:            j.postedAt,
-          status:              'found',
-          recruiterEmail:      hr?.email         || null,
-          recruiterName:       hr?.name          || null,
-          recruiterConfidence: hr?.confidence    || null,
-          recruiterSource:     hr?.source        || null,
-          careerPageUrl:       hr?.careerPageUrl || null,
+          userId:               req.user._id,
+          searchId:             jobSearch._id,
+          externalId:           j.externalId,
+          title:                j.title,
+          company:              j.company,
+          location:             j.location,
+          description:          j.description,
+          url:                  j.url,
+          salary:               j.salary,
+          source:               j.source,
+          remote:               j.remote,
+          matchScore:           j.matchScore,
+          postedAt:             j.postedAt,
+          status:               'found',
+          // ── Global store refs ─────────────────────────────────
+          companyId:            companyIdMap[j.company]  || null,
+          globalJobId:          globalJobIdMap[globalKey] || null,
+          // ── HR contact data ───────────────────────────────────
+          // Pattern emails are guesses — never save them on job records
+          recruiterEmail:       hr?.source !== 'pattern' ? (topContact?.email      || hr?.email)      : null,
+          recruiterName:        hr?.source !== 'pattern' ? (topContact?.name       || hr?.name)       : null,
+          recruiterConfidence:  hr?.source !== 'pattern' ? (topContact?.confidence || hr?.confidence) : null,
+          recruiterSource:      hr?.source !== 'pattern' ? hr?.source              : null,
+          recruiterEmailStatus: hr?.source !== 'pattern' ? (topContact?.status     || hr?.status || 'unknown') : 'unknown',
+          allRecruiterContacts: hr?.source !== 'pattern' ? (hr?.contacts || [])   : [],
+          careerPageUrl:        hr?.careerPageUrl       || null,
+          linkedinUrl:          hr?.linkedinUrl         || null,
+          employeeSearch:       hr?.employeeSearch      || null,
         };
       });
 
-      await Job.insertMany(jobDocs, { ordered: false }).catch(err =>
-        logger.warn('Some jobs failed to insert (likely duplicates):', err.message)
+      const inserted = await Job.insertMany(jobDocs, { ordered: false, rawResult: true }).catch(err => {
+        logger.warn('Some jobs failed to insert (likely duplicates):', err.message);
+        return null;
+      });
+
+      // Collect inserted IDs for data linking
+      savedJobIds = inserted?.insertedIds ? Object.values(inserted.insertedIds) : [];
+    }
+
+    // ── Auto-link existing recruiter lookups to newly saved jobs ──
+    // Runs async — doesn't block the response
+    if (savedJobIds.length > 0) {
+      linkRecruitersToJobs(req.user._id, savedJobIds).catch(err =>
+        logger.warn('dataLinker async failed:', err.message)
       );
     }
 

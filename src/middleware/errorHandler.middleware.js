@@ -1,4 +1,14 @@
-const logger = require('../config/logger');
+const logger      = require('../config/logger');
+const ErrorLog    = require('../models/ErrorLog');
+const UserCredits = require('../models/UserCredits');
+
+// Severity based on status code
+const getSeverity = (statusCode) => {
+  if (statusCode >= 500) return 'critical';
+  if (statusCode === 429) return 'medium';
+  if (statusCode >= 400) return 'low';
+  return 'low';
+};
 
 const errorHandler = (err, req, res, _next) => {
   let { statusCode = 500, message = 'Internal server error', code = 'SERVER_ERROR' } = err;
@@ -55,15 +65,59 @@ const errorHandler = (err, req, res, _next) => {
     message = 'External API error. Please try again later.';
   }
 
-  // ── Log server errors ─────────────────────────────────────────────
+  // ── Auto-refund credits on system errors (5xx) ───────────────────
+  // If the middleware already deducted credits and the controller threw
+  // a system error (not a user/validation error), give them back.
+  // This covers search failures, AI timeouts, HR lookup errors, etc.
+  if (statusCode >= 500 && req.creditsDeducted > 0 && req.user?._id) {
+    UserCredits.findOneAndUpdate(
+      { userId: req.user._id },
+      { $inc: { usedCredits: -req.creditsDeducted } }
+    ).catch(e => logger.warn(`Credit auto-refund failed for ${req.user.email}: ${e.message}`));
+
+    logger.info(
+      `Credits auto-refunded: ${req.creditsDeducted} → ${req.user.email} ` +
+      `(${req.method} ${req.originalUrl} failed with ${statusCode})`
+    );
+    req.creditsDeducted = 0; // prevent double-refund if error handler called twice
+  }
+
+  // ── Log to console ────────────────────────────────────────────────
   if (statusCode >= 500) {
     logger.error(`[${req.method}] ${req.originalUrl} — ${err.message}`, {
-      userId:  req.user?._id,
-      body:    process.env.NODE_ENV === 'development' ? req.body : '[hidden]',
-      stack:   err.stack,
+      userId: req.user?._id,
+      body:   process.env.NODE_ENV === 'development' ? req.body : '[hidden]',
+      stack:  err.stack,
     });
   } else if (statusCode >= 400) {
     logger.warn(`[${req.method}] ${req.originalUrl} — ${statusCode} ${message}`);
+  }
+
+  // ── Persist to ErrorLog collection (async, non-blocking) ──────────
+  // Skip 401/404 noise and health checks
+  const skipLog = statusCode === 401 || statusCode === 404 ||
+    req.originalUrl.includes('/health') || req.originalUrl.includes('/favicon');
+
+  if (!skipLog) {
+    ErrorLog.create({
+      userId:     req.user?._id   || null,
+      userEmail:  req.user?.email || null,
+      type:       'backend',
+      severity:   getSeverity(statusCode),
+      message,
+      code,
+      stack:      statusCode >= 500 ? err.stack : null,
+      endpoint:   req.originalUrl,
+      method:     req.method,
+      statusCode,
+      ip:         req.ip || req.connection?.remoteAddress,
+      userAgent:  req.headers?.['user-agent'],
+      metadata: {
+        body:   statusCode >= 500 && process.env.NODE_ENV === 'development' ? req.body : undefined,
+        params: req.params,
+        query:  req.query,
+      },
+    }).catch(() => {}); // never block the response
   }
 
   const payload = { success: false, message, code };

@@ -4,6 +4,7 @@ const { findHRContacts } = require('../services/emailFinder');
 const hunter             = require('../services/emailFinder/hunter.service');
 const apollo             = require('../services/emailFinder/apollo.service');
 const pattern            = require('../services/emailFinder/pattern.service');
+const { linkLookupToJobs } = require('../services/dataLinker.service');
 const { success, paginated } = require('../utils/response.util');
 const { ValidationError }    = require('../utils/errors');
 const logger = require('../config/logger');
@@ -88,7 +89,7 @@ exports.lookupEmail = async (req, res, next) => {
     const top    = result.emails?.[0] || null;
 
     // Always persist this lookup so it appears in recruiter history
-    RecruiterLookup.findOneAndUpdate(
+    const savedLookup = await RecruiterLookup.findOneAndUpdate(
       { userId: req.user._id, company: new RegExp(`^${company.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
       {
         $set: {
@@ -101,14 +102,23 @@ exports.lookupEmail = async (req, res, next) => {
           confidence:     top?.confidence      || null,
           linkedin:       top?.linkedin        || null,
           title:          top?.title           || null,
-          allEmails:      result.emails        || [],
+          status:         top?.status          || 'unknown',
+          allEmails:      (result.emails || []).map(e => ({
+            email:      e.email,
+            name:       e.name       || '',
+            confidence: e.confidence || 0,
+            linkedin:   e.linkedin   || null,
+            title:      e.title      || '',
+            source:     e.source     || result.source,
+            status:     e.status     || 'unknown',
+          })),
           careerPageUrl:  result.careerPageUrl || null,
           linkedinUrl:    result.linkedinUrl   || null,
           employeeSearch: result.employeeSearch|| null,
         },
       },
       { upsert: true, new: true }
-    ).catch(err => logger.warn(`RecruiterLookup save failed: ${err.message}`));
+    ).catch(err => { logger.warn(`RecruiterLookup save failed: ${err.message}`); return null; });
 
     // If jobId provided, also save recruiter info to that job
     if (jobId && top) {
@@ -116,14 +126,27 @@ exports.lookupEmail = async (req, res, next) => {
         { _id: jobId, userId: req.user._id },
         {
           $set: {
-            recruiterEmail:      top.email,
-            recruiterName:       top.name,
-            recruiterConfidence: top.confidence,
-            recruiterSource:     result.source,
-            recruiterLinkedIn:   top.linkedin,
-            careerPageUrl:       result.careerPageUrl,
+            recruiterEmail:       top.email,
+            recruiterName:        top.name,
+            recruiterConfidence:  top.confidence,
+            recruiterSource:      result.source,
+            recruiterLinkedIn:    top.linkedin,
+            recruiterEmailStatus: top.status || 'unknown',
+            allRecruiterContacts: (result.emails || []).map(e => ({
+              email: e.email, name: e.name || '', title: e.title || '',
+              confidence: e.confidence || 0, source: e.source || result.source,
+              status: e.status || 'unknown', linkedin: e.linkedin || null,
+            })),
+            careerPageUrl: result.careerPageUrl,
           },
         }
+      );
+    }
+
+    // Back-link this lookup to all existing jobs with same company (async)
+    if (savedLookup) {
+      linkLookupToJobs(req.user._id, company, savedLookup).catch(err =>
+        logger.warn(`dataLinker back-link failed: ${err.message}`)
       );
     }
 
