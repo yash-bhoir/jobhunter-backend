@@ -11,5 +11,6 @@ router.use('/config',    require('./config.routes'));
 router.use('/logs',      require('./logs.routes'));
 router.use('/comms',     require('./comms.routes'));
 router.use('/api-keys',  require('./apikeys.routes'));
+router.use('/career-scan', require('./careerScan.routes'));
 
 module.exports = router;

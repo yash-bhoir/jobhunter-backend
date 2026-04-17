@@ -1,5 +1,6 @@
-const logger   = require('../config/logger');
-const ErrorLog = require('../models/ErrorLog');
+const logger      = require('../config/logger');
+const ErrorLog    = require('../models/ErrorLog');
+const UserCredits = require('../models/UserCredits');
 
 // Severity based on status code
 const getSeverity = (statusCode) => {
@@ -62,6 +63,23 @@ const errorHandler = (err, req, res, _next) => {
   if (err.isAxiosError) {
     statusCode = 502; code = 'UPSTREAM_ERROR';
     message = 'External API error. Please try again later.';
+  }
+
+  // ── Auto-refund credits on system errors (5xx) ───────────────────
+  // If the middleware already deducted credits and the controller threw
+  // a system error (not a user/validation error), give them back.
+  // This covers search failures, AI timeouts, HR lookup errors, etc.
+  if (statusCode >= 500 && req.creditsDeducted > 0 && req.user?._id) {
+    UserCredits.findOneAndUpdate(
+      { userId: req.user._id },
+      { $inc: { usedCredits: -req.creditsDeducted } }
+    ).catch(e => logger.warn(`Credit auto-refund failed for ${req.user.email}: ${e.message}`));
+
+    logger.info(
+      `Credits auto-refunded: ${req.creditsDeducted} → ${req.user.email} ` +
+      `(${req.method} ${req.originalUrl} failed with ${statusCode})`
+    );
+    req.creditsDeducted = 0; // prevent double-refund if error handler called twice
   }
 
   // ── Log to console ────────────────────────────────────────────────

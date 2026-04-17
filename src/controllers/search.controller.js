@@ -126,11 +126,22 @@ exports.runSearch = async (req, res, next) => {
         req.user, plan, onProgress
       );
     } catch (searchErr) {
+      // Mark search as failed
       await JobSearch.findByIdAndUpdate(jobSearch._id, {
         status: 'failed',
         error:  searchErr.message,
       });
+      // Credits will be auto-refunded by global error handler (5xx path)
       throw searchErr;
+    }
+
+    // Refund if search returned 0 jobs — APIs were reachable but no results
+    if ((!result.jobs || result.jobs.length === 0) && req.creditsDeducted) {
+      await UserCredits.findOneAndUpdate(
+        { userId: req.user._id },
+        { $inc: { usedCredits: -req.creditsDeducted } }
+      ).catch(e => logger.warn(`Zero-result credit refund failed: ${e.message}`));
+      req.creditsDeducted = 0;
     }
 
     const durationMs = Date.now() - startTime;

@@ -4,7 +4,24 @@ const LinkedInJob = require('../../models/LinkedInJob');
 const { fetchLinkedInRSS, scrapeLinkedInJobs } = require('./rss.service');
 const { findHRContacts } = require('../emailFinder');
 const { score }   = require('../jobSearch/scorer');
+const { sendEmail, templates } = require('../../config/mailer');
 const logger      = require('../../config/logger');
+
+// Check if user's alert frequency allows sending now
+const shouldSendAlert = (user) => {
+  if (!user.linkedinAlerts?.enabled) return false;
+  const freq      = user.linkedinAlerts?.frequency || 'daily';
+  const lastSent  = user.linkedinAlerts?.lastSentAt;
+  if (!lastSent) return true;
+
+  const diffMs   = Date.now() - new Date(lastSent).getTime();
+  const diffHrs  = diffMs / (1000 * 60 * 60);
+
+  if (freq === 'hourly') return diffHrs >= 1;
+  if (freq === 'daily')  return diffHrs >= 23;   // slight buffer
+  if (freq === 'weekly') return diffHrs >= 167;
+  return true;
+};
 
 // Run every hour — fetch LinkedIn jobs for Pro users who have alerts configured
 const startScheduler = () => {
@@ -12,18 +29,24 @@ const startScheduler = () => {
     logger.info('LinkedIn alert scheduler started');
 
     try {
-      // Find all pro/team users with target role set
+      // Find all pro/team users with target role set and alerts enabled (or default)
       const users = await User.find({
         plan:   { $in: ['pro', 'team'] },
         status: 'active',
         'profile.targetRole': { $exists: true, $ne: '' },
+        $or: [
+          { 'linkedinAlerts.enabled': true },
+          { 'linkedinAlerts.enabled': { $exists: false } },
+        ],
       }).lean();
 
       logger.info(`Processing LinkedIn alerts for ${users.length} Pro users`);
 
       for (const user of users) {
         try {
-          await fetchAndSaveForUser(user);
+          if (shouldSendAlert(user)) {
+            await fetchAndSaveForUser(user);
+          }
           // Rate limit — wait 2s between users
           await new Promise(r => setTimeout(r, 2000));
         } catch (err) {
@@ -108,6 +131,24 @@ const fetchAndSaveForUser = async (user) => {
   }
 
   logger.info(`LinkedIn: saved ${jobDocs.length} new jobs for ${user.email} (${role})`);
+
+  // Send email digest notification
+  try {
+    const name = user.profile?.firstName || 'there';
+    const { subject, html } = templates.jobAlert(
+      name,
+      jobDocs.map((j, i) => ({ ...j, matchScore: scored[i]?.matchScore || 0 })),
+      role,
+      process.env.CLIENT_URL || 'https://jobhunter-ti0b.onrender.com'
+    );
+    await sendEmail({ to: user.email, subject, html });
+
+    // Update lastSentAt
+    await User.findByIdAndUpdate(user._id, { 'linkedinAlerts.lastSentAt': new Date() });
+    logger.info(`Job alert email sent to ${user.email}: ${jobDocs.length} jobs`);
+  } catch (emailErr) {
+    logger.warn(`Job alert email failed for ${user.email}: ${emailErr.message}`);
+  }
 };
 
 module.exports = { startScheduler, fetchAndSaveForUser };

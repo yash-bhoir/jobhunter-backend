@@ -87,6 +87,48 @@ const templates = {
     `,
   }),
 
+  jobAlert: (name, jobs, role, clientUrl) => {
+    const jobRows = jobs.slice(0, 10).map(j => `
+      <tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:12px 8px">
+          <p style="margin:0;font-weight:600;color:#1e293b;font-size:14px">${j.title}</p>
+          <p style="margin:4px 0 0;color:#64748b;font-size:13px">${j.company}${j.location ? ` · ${j.location}` : ''}${j.remote ? ' · Remote' : ''}</p>
+          ${j.matchScore > 0 ? `<p style="margin:4px 0 0;color:#2563eb;font-size:12px;font-weight:600">${j.matchScore}% match</p>` : ''}
+        </td>
+        <td style="padding:12px 8px;text-align:right;vertical-align:top">
+          ${j.url ? `<a href="${j.url}" style="background:#2563eb;color:white;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:600;white-space:nowrap">View Job</a>` : ''}
+        </td>
+      </tr>
+    `).join('');
+
+    return {
+      subject: `🔔 ${jobs.length} new ${role} jobs found for you`,
+      html: `
+        <div style="font-family:sans-serif;max-width:620px;margin:0 auto;padding:24px;background:#f8fafc">
+          <div style="background:white;border-radius:16px;padding:32px;box-shadow:0 1px 8px rgba(0,0,0,0.06)">
+            <div style="text-align:center;margin-bottom:24px">
+              <div style="width:48px;height:48px;background:#2563eb;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px">
+                <span style="color:white;font-size:24px">💼</span>
+              </div>
+              <h1 style="margin:0;font-size:22px;font-weight:800;color:#1e293b">New Jobs Found!</h1>
+              <p style="margin:8px 0 0;color:#64748b;font-size:14px">Hi ${name}, we found <strong>${jobs.length} new ${role} jobs</strong> matching your profile</p>
+            </div>
+            <table style="width:100%;border-collapse:collapse">
+              ${jobRows}
+            </table>
+            <div style="text-align:center;margin-top:24px">
+              <a href="${clientUrl}/linkedin" style="display:inline-block;background:#2563eb;color:white;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px">View All Jobs →</a>
+            </div>
+            <p style="color:#94a3b8;font-size:12px;text-align:center;margin-top:20px">
+              You're receiving this because LinkedIn job alerts are enabled.<br>
+              <a href="${clientUrl}/linkedin" style="color:#2563eb">Manage alert settings</a>
+            </p>
+          </div>
+        </div>
+      `,
+    };
+  },
+
   lowCredits: (name, remaining) => ({
     subject: 'Your JobHunter credits are running low',
     html: `

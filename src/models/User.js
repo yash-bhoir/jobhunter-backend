@@ -105,6 +105,13 @@ gmailRefreshToken: { type: String, select: false },
 gmailConnectedAt:  Date,
 gmailEmail:        String,
 
+  // LinkedIn job alert preferences
+  linkedinAlerts: {
+    enabled:    { type: Boolean, default: true },
+    frequency:  { type: String, enum: ['hourly', 'daily', 'weekly'], default: 'daily' },
+    lastSentAt: Date,
+  },
+
 }, { timestamps: true });
 
 // ── Hash password before save ─────────────────────────────────────
