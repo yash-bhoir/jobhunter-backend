@@ -16,9 +16,9 @@ router.use('/geo-jobs', require('./geoJobs.routes'));
 router.use('/config',     require('./config.routes'));
 
 // ── Frontend error reporting (authenticated users) ────────────────
-const { protect } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
 const { reportFrontendError } = require('../controllers/admin/logs.controller');
-router.post('/errors/report', protect, reportFrontendError);
+router.post('/errors/report', authenticate, reportFrontendError);
 
 router.get('/ping', (_req, res) => {
   res.json({ success: true, message: 'API is running', timestamp: new Date() });
