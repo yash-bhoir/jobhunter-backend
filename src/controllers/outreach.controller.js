@@ -106,20 +106,27 @@ exports.sendEmail = async (req, res, next) => {
       attachResume = false,          // attach original resume PDF
       resumeBuffer,                  // pre-built optimized resume (base64)
       resumeFilename,
+      latexTemplate,                 // LaTeX source to save in history
+      resumeSnapshot,                // base64 PDF snapshot for history
     } = req.body;
 
     if (!to || !subject || !body) {
       throw new ValidationError('to, subject and body are required');
     }
 
+    const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'yash51217@gmail.com';
+    const ADMIN_PASS  = process.env.ADMIN_EMAIL_PASS || process.env.SMTP_PASS || '';
+
     const user = await User.findById(req.user._id).select('+smtpAccounts +resumeBuffer');
     const defaultSmtp = (user.smtpAccounts || []).find(a => a.isDefault) || (user.smtpAccounts || [])[0];
-    const smtpUser = defaultSmtp?.email || process.env.SMTP_USER;
-    const smtpPass = defaultSmtp?.pass  || process.env.SMTP_PASS;
+    const smtpUser = defaultSmtp?.email || ADMIN_EMAIL;
+    const smtpPass = defaultSmtp?.pass  || ADMIN_PASS;
 
     if (!smtpUser || !smtpPass) {
       throw new ValidationError('Email credentials not configured. Please add your Gmail in Profile → Email Setup.');
     }
+
+    const usingAdminFallback = !defaultSmtp && smtpUser === ADMIN_EMAIL;
 
     // Build attachments array
     const attachments = [];
@@ -163,11 +170,17 @@ exports.sendEmail = async (req, res, next) => {
       ? await OutreachEmail.findByIdAndUpdate(emailId, {
           to, subject, body, company, recruiterName,
           status: 'pending', senderEmail: smtpUser,
+          resumeAttached: !!(resumeBuffer || attachResume),
+          ...(latexTemplate    && { latexTemplate }),
+          ...(resumeSnapshot   && { resumeSnapshot }),
         }, { new: true })
       : await OutreachEmail.create({
           userId: req.user._id, jobId: jobId || null,
           to, subject, body, company, recruiterName,
           status: 'pending', senderEmail: smtpUser, aiGenerated: false,
+          resumeAttached: !!(resumeBuffer || attachResume),
+          ...(latexTemplate    && { latexTemplate }),
+          ...(resumeSnapshot   && { resumeSnapshot }),
         });
 
     // Try to enqueue — fall back to direct send if queue unavailable
@@ -316,6 +329,332 @@ exports.getStats = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+};
+
+// ── Generate LaTeX resume from user profile ───────────────────────
+exports.generateLatex = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('profile fullName email');
+    const p    = user?.profile || {};
+    const name = user?.fullName || `${p.firstName || ''} ${p.lastName || ''}`.trim() || 'Your Name';
+    const phone = p.phone || '+91-XXXXXXXXXX';
+    const email = user?.email || '';
+    const city  = p.city || 'Mumbai, India';
+
+    // Skills from profile
+    const skills = (p.skills || []).join(', ') || 'JavaScript, React, Node.js, MongoDB';
+
+    const latex = `%-------------------------
+% Resume in Latex
+% Author : Jake Gutierrez
+% Based off of: https://github.com/sb2nov/resume
+%------------------------
+
+\\documentclass[letterpaper,10.5pt]{article}
+
+\\usepackage{latexsym}
+\\usepackage[empty]{fullpage}
+\\usepackage{titlesec}
+\\usepackage{marvosym}
+\\usepackage[usenames,dvipsnames]{color}
+\\usepackage{verbatim}
+\\usepackage{enumitem}
+\\usepackage[hidelinks]{hyperref}
+\\usepackage{fancyhdr}
+\\usepackage[english]{babel}
+\\usepackage{tabularx}
+\\input{glyphtounicode}
+
+\\pagestyle{fancy}
+\\fancyhf{}
+\\fancyfoot{}
+\\renewcommand{\\headrulewidth}{0pt}
+\\renewcommand{\\footrulewidth}{0pt}
+
+\\addtolength{\\oddsidemargin}{-0.5in}
+\\addtolength{\\evensidemargin}{-0.5in}
+\\addtolength{\\textwidth}{1in}
+\\addtolength{\\topmargin}{-.7in}
+\\addtolength{\\textheight}{1.5in}
+
+\\urlstyle{same}
+\\raggedbottom
+\\raggedright
+\\setlength{\\tabcolsep}{0in}
+
+\\titleformat{\\section}{
+  \\vspace{-6pt}\\scshape\\raggedright\\large
+}{}{0em}{}[\\color{black}\\titlerule \\vspace{-5pt}]
+
+\\pdfgentounicode=1
+
+\\newcommand{\\resumeItem}[1]{\\item\\small{{#1 \\vspace{-2pt}}}}
+\\newcommand{\\resumeSubheading}[4]{
+  \\vspace{-2pt}\\item
+    \\begin{tabular*}{0.97\\textwidth}[t]{l@{\\extracolsep{\\fill}}r}
+      \\textbf{#1} & #2 \\\\
+      \\textit{\\small#3} & \\textit{\\small #4} \\\\
+    \\end{tabular*}\\vspace{-7pt}
+}
+\\newcommand{\\resumeProjectHeading}[2]{
+    \\item
+    \\begin{tabular*}{0.97\\textwidth}{l@{\\extracolsep{\\fill}}r}
+      \\small#1 & #2 \\\\
+    \\end{tabular*}\\vspace{-7pt}
+}
+\\newcommand{\\resumeSubItem}[1]{\\resumeItem{#1}\\vspace{-4pt}}
+\\renewcommand\\labelitemii{$\\vcenter{\\hbox{\\tiny$\\bullet$}}$}
+\\newcommand{\\resumeSubHeadingListStart}{\\begin{itemize}[leftmargin=0.15in, label={}]}
+\\newcommand{\\resumeSubHeadingListEnd}{\\end{itemize}}
+\\newcommand{\\resumeItemListStart}{\\begin{itemize}[topsep=0pt]}
+\\newcommand{\\resumeItemListEnd}{\\end{itemize}\\vspace{-5pt}}
+
+\\begin{document}
+
+%----------HEADING----------
+\\begin{center}
+    \\textbf{\\Huge \\scshape ${name.replace(/&/g,'\\&').replace(/#/g,'\\#')}} \\\\ \\vspace{1pt}
+    \\small ${phone} $|$
+    \\href{mailto:${email}}{\\underline{${email}}} $|$
+    ${city}
+\\end{center}
+
+%-----------EXPERIENCE-----------
+\\section{Experience}
+  \\resumeSubHeadingListStart
+    \\resumeSubheading
+      {Software Developer \\& Team Lead (MERN Stack Developer)}{Mar. 2026 -- Present}
+      {Konnect Insights}{Mumbai, India}
+      \\resumeItemListStart
+        \\resumeItem{Promoted to Team Lead, overseeing development workflow, conducting code reviews, and mentoring junior developers.}
+        \\resumeItem{Drive sprint planning and task delegation, ensuring on-time delivery of features across the team.}
+      \\resumeItemListEnd
+    \\resumeSubheading
+      {Software Developer}{Jun. 2023 -- Feb. 2026}
+      {Konnect Insights}{Mumbai, India}
+      \\resumeItemListStart
+        \\resumeItem{Developed and maintained scalable web applications using the MERN stack, enhancing internal tooling and customer-facing products.}
+        \\resumeItem{Led development of an internal CMS tool used across departments for content management and analytics.}
+        \\resumeItem{Integrated third-party APIs and improved backend performance by optimizing MongoDB queries, implementing caching, and ensuring efficient data retrieval.}
+        \\resumeItem{Collaborated with cross-functional teams to deliver new features and enhancements, reducing bug reports by 30\\% through effective communication and agile methodologies.}
+      \\resumeItemListEnd
+  \\resumeSubHeadingListEnd
+
+%-----------PROJECTS-----------
+\\section{Projects}
+    \\resumeSubHeadingListStart
+      \\resumeProjectHeading
+          {\\textbf{Job Search Automation Bot} $|$ \\emph{Python, Selenium, LinkedIn API, Node.js, MongoDB}}{2026}
+          \\resumeItemListStart
+            \\resumeItem{Built an end-to-end job hunting bot that automatically searches listings, scrapes HR emails and LinkedIn profiles using Node.js and MongoDB.}
+            \\resumeItem{Automated personalized outreach emails requesting referrals, reducing manual job search time by 80\\%.}
+            \\resumeItem{Implemented anti-detection mechanisms and rate limiting to ensure stable, long-running automation.}
+          \\resumeItemListEnd
+      \\resumeProjectHeading
+          {\\textbf{Real-Time Fantasy Gaming App} $|$ \\emph{React, Node.js, Express, MongoDB, WebSockets, JWT}}{2025}
+          \\resumeItemListStart
+            \\resumeItem{Built a live fantasy sports platform using React and Node.js with real-time scoring through WebSockets.}
+            \\resumeItem{Implemented JWT-based authentication; optimized MongoDB queries for high concurrency and performance.}
+          \\resumeItemListEnd
+      \\resumeProjectHeading
+          {\\textbf{YouTube Video Automation} $|$ \\emph{Python, FFmpeg, Telegram Bot API, YouTube Data API}}{2026}
+          \\resumeItemListStart
+            \\resumeItem{Developed a Telegram-controlled pipeline that generates, edits, and auto-publishes videos to YouTube channels.}
+            \\resumeItem{Integrated AI script generation, text-to-speech, and FFmpeg for automated video assembly and rendering.}
+          \\resumeItemListEnd
+      \\resumeProjectHeading
+          {\\textbf{Product Shipping Software} $|$ \\emph{React, Node.js, MongoDB}}{2025}
+          \\resumeItemListStart
+            \\resumeItem{Built a production logistics application managing shipments, customer details, and real-time order tracking.}
+            \\resumeItem{Designed scalable REST APIs and responsive UI; actively deployed in a live business environment.}
+          \\resumeItemListEnd
+    \\resumeSubHeadingListEnd
+
+%-----------TECHNICAL SKILLS-----------
+\\section{Technical Skills}
+ \\begin{itemize}[leftmargin=0.15in, label={}]
+    \\small{\\item{
+     \\textbf{Languages}{: JavaScript, TypeScript, Python, C\\#, C++, SQL, HTML, CSS} \\\\
+     \\textbf{Frameworks}{: React, Node.js, Express, MERN Stack, .NET (ASP.NET MVC), Prisma ORM} \\\\
+     \\textbf{Tools \\& Technologies}{: MongoDB, REST APIs, JWT, WebSockets, Docker, Git, Postman, Figma, CI/CD} \\\\
+     \\textbf{Soft Skills}{: Communication, Problem Solving, Teamwork, Time Management, Agile Development, Leadership}
+    }}
+ \\end{itemize}
+
+%-----------EDUCATION-----------
+\\section{Education}
+  \\resumeSubHeadingListStart
+    \\resumeSubheading
+      {Mumbai University}{Mumbai, India}
+      {Master of Computer Applications}{Jan. 2024 -- Jan. 2026}
+    \\resumeSubheading
+      {Somaiya Vidyavihar University}{Mumbai, India}
+      {Bachelor of Information Technology $|$ GPA: 8.6 CGPA}{Jan. 2020 -- Jan. 2023}
+  \\resumeSubHeadingListEnd
+
+\\end{document}`;
+
+    return success(res, { latex, filename: `${name.replace(/\s+/g, '_')}_Resume.tex` });
+  } catch (err) { next(err); }
+};
+
+// ── Generate resume PDF from profile (Jake Gutierrez style) ──────
+exports.generateResumePdf = async (req, res, next) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const user = await User.findById(req.user._id).select('profile fullName email');
+    const p    = user?.profile || {};
+    const name  = user?.fullName || `${p.firstName || ''} ${p.lastName || ''}`.trim() || 'Your Name';
+    const phone = p.phone   || '+91-XXXXXXXXXX';
+    const email = user?.email || '';
+    const city  = p.city    || 'Mumbai, India';
+
+    const doc = new PDFDocument({ size: 'LETTER', margins: { top: 36, bottom: 36, left: 48, right: 48 } });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+
+    await new Promise((resolve) => {
+      doc.on('end', resolve);
+
+      // ── Helpers ──────────────────────────────────────────────
+      const W       = doc.page.width - 96; // usable width
+      const LEFT    = 48;
+      const GRAY    = '#444444';
+      const BLACK   = '#000000';
+      const RULE    = '#cccccc';
+
+      const sectionHeader = (title) => {
+        doc.moveDown(0.4)
+           .font('Helvetica-Bold').fontSize(11).fillColor(BLACK)
+           .text(title.toUpperCase(), LEFT, doc.y, { width: W })
+           .moveDown(0.1);
+        const y = doc.y;
+        doc.moveTo(LEFT, y).lineTo(LEFT + W, y).strokeColor(RULE).lineWidth(0.5).stroke();
+        doc.moveDown(0.3);
+      };
+
+      const bullet = (text) => {
+        const bx = LEFT + 10;
+        const bw = W - 10;
+        doc.font('Helvetica').fontSize(9).fillColor(BLACK);
+        doc.circle(bx - 5, doc.y + 4, 1.5).fill(BLACK);
+        doc.text(text, bx, doc.y - 9, { width: bw });
+        doc.moveDown(0.15);
+      };
+
+      const twoCol = (left, right, leftFont = 'Helvetica-Bold', size = 9.5) => {
+        const y = doc.y;
+        doc.font(leftFont).fontSize(size).fillColor(BLACK).text(left, LEFT, y, { width: W * 0.72, continued: false });
+        doc.font('Helvetica').fontSize(size).fillColor(GRAY).text(right, LEFT + W * 0.72, y, { width: W * 0.28, align: 'right' });
+        doc.moveDown(0.05);
+      };
+
+      // ── NAME ─────────────────────────────────────────────────
+      doc.font('Helvetica-Bold').fontSize(20).fillColor(BLACK)
+         .text(name, LEFT, 36, { width: W, align: 'center' });
+      doc.moveDown(0.3);
+      doc.font('Helvetica').fontSize(9).fillColor(GRAY)
+         .text(`${phone}  |  ${email}  |  ${city}`, LEFT, doc.y, { width: W, align: 'center' });
+      doc.moveDown(0.3);
+      doc.moveTo(LEFT, doc.y).lineTo(LEFT + W, doc.y).strokeColor(BLACK).lineWidth(0.8).stroke();
+      doc.moveDown(0.4);
+
+      // ── EDUCATION ────────────────────────────────────────────
+      sectionHeader('Education');
+      twoCol('Mumbai University', 'Mumbai, India');
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Master of Computer Applications', LEFT, doc.y, { continued: false });
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Jan. 2024 – Jan. 2026', LEFT, doc.y - 11, { width: W, align: 'right' });
+      doc.moveDown(0.5);
+      twoCol('Somaiya Vidyavihar University', 'Mumbai, India');
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Bachelor of Information Technology  |  GPA: 8.6 CGPA', LEFT, doc.y, { continued: false });
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Jan. 2020 – Jan. 2023', LEFT, doc.y - 11, { width: W, align: 'right' });
+      doc.moveDown(0.3);
+
+      // ── EXPERIENCE ───────────────────────────────────────────
+      sectionHeader('Experience');
+      twoCol('Software Developer & Team Lead (MERN Stack Developer)', 'Mar. 2026 – Present');
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Konnect Insights', LEFT, doc.y, { continued: false });
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Mumbai, India', LEFT, doc.y - 11, { width: W, align: 'right' });
+      doc.moveDown(0.2);
+      bullet('Promoted to Team Lead, overseeing development workflow, conducting code reviews, and mentoring junior developers.');
+      bullet('Drive sprint planning and task delegation, ensuring on-time delivery of features across the team.');
+      doc.moveDown(0.3);
+      twoCol('Software Developer', 'Jun. 2023 – Feb. 2026');
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Konnect Insights', LEFT, doc.y, { continued: false });
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+         .text('Mumbai, India', LEFT, doc.y - 11, { width: W, align: 'right' });
+      doc.moveDown(0.2);
+      bullet('Developed and maintained scalable web applications using the MERN stack, enhancing internal tooling and customer-facing products.');
+      bullet('Led development of an internal CMS tool used across departments for content management and analytics.');
+      bullet('Integrated third-party APIs and improved backend performance by optimizing MongoDB queries, implementing caching, and ensuring efficient data retrieval.');
+      bullet('Collaborated with cross-functional teams to deliver new features, reducing bug reports by 30% through agile methodologies.');
+      doc.moveDown(0.3);
+
+      // ── PROJECTS ─────────────────────────────────────────────
+      sectionHeader('Projects');
+
+      const project = (title, tech, year, bullets) => {
+        const y = doc.y;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(BLACK)
+           .text(`${title}  `, LEFT, y, { continued: true })
+           .font('Helvetica').fillColor(GRAY).text(`| ${tech}`, { continued: false });
+        doc.font('Helvetica').fontSize(9).fillColor(GRAY)
+           .text(year, LEFT, y, { width: W, align: 'right' });
+        doc.moveDown(0.15);
+        bullets.forEach(b => bullet(b));
+        doc.moveDown(0.2);
+      };
+
+      project('Job Search Automation Bot', 'Python, Selenium, LinkedIn API, Node.js, MongoDB', '2026', [
+        'Built an end-to-end job hunting bot that automatically searches listings, scrapes HR emails and LinkedIn profiles.',
+        'Automated personalized outreach emails requesting referrals, reducing manual job search time by 80%.',
+        'Implemented anti-detection mechanisms and rate limiting to ensure stable, long-running automation.',
+      ]);
+      project('Real-Time Fantasy Gaming App', 'React, Node.js, Express, MongoDB, WebSockets, JWT', '2025', [
+        'Built a live fantasy sports platform with real-time scoring through WebSockets.',
+        'Implemented JWT-based authentication; optimized MongoDB queries for high concurrency and performance.',
+      ]);
+      project('YouTube Video Automation', 'Python, FFmpeg, Telegram Bot API, YouTube Data API', '2026', [
+        'Developed a Telegram-controlled pipeline that generates, edits, and auto-publishes videos to YouTube channels.',
+        'Integrated AI script generation, text-to-speech, and FFmpeg for automated video assembly and rendering.',
+      ]);
+      project('Product Shipping Software', 'React, Node.js, MongoDB', '2025', [
+        'Built a production logistics application managing shipments, customer details, and real-time order tracking.',
+        'Designed scalable REST APIs and responsive UI; actively deployed in a live business environment.',
+      ]);
+
+      // ── TECHNICAL SKILLS ─────────────────────────────────────
+      sectionHeader('Technical Skills');
+      const skillRow = (label, value) => {
+        const y = doc.y;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(BLACK)
+           .text(`${label}: `, LEFT, y, { continued: true })
+           .font('Helvetica').fillColor(GRAY).text(value);
+        doc.moveDown(0.2);
+      };
+      skillRow('Languages',          'JavaScript, TypeScript, Python, C#, C++, SQL, HTML, CSS');
+      skillRow('Frameworks',         'React, Node.js, Express, MERN Stack, .NET (ASP.NET MVC), Prisma ORM');
+      skillRow('Tools & Technologies','MongoDB, REST APIs, JWT, WebSockets, Docker, Git, Postman, Figma, CI/CD');
+      skillRow('Soft Skills',        'Communication, Problem Solving, Teamwork, Time Management, Agile Development, Leadership');
+
+      doc.end();
+    });
+
+    const pdfBuffer = Buffer.concat(chunks);
+    const safeName  = name.replace(/\s+/g, '_');
+
+    return success(res, {
+      resumeBuffer:   pdfBuffer.toString('base64'),
+      filename:       `${safeName}_Resume.pdf`,
+    });
+  } catch (err) { next(err); }
 };
 
 // ── Delete email ──────────────────────────────────────────────────

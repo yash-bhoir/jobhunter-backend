@@ -6,13 +6,18 @@ const { requireCredits, planGuard } = require('../middleware/credits.middleware'
 
 router.use(authenticate);
 
-router.get ('/jobs',              ctrl.getJobs);
-router.post('/jobs',              ctrl.addJob);
-router.post('/fetch',             ctrl.fetchAlerts);        // ← NEW auto-fetch
-router.get ('/jobs/:id',          ctrl.getJob);
-router.patch('/jobs/:id/status',  ctrl.updateStatus);
-router.post('/jobs/:id/find-hr',  planGuard('pro', 'team'), requireCredits('HUNTER_LOOKUP'), ctrl.findHR);
-router.delete('/jobs/:id',        ctrl.deleteJob);
+router.get ('/jobs',                      ctrl.getJobs);
+router.post('/jobs',                      ctrl.addJob);
+router.post('/fetch',                     ctrl.fetchAlerts);
+router.get ('/jobs/:id',                  ctrl.getJob);
+router.patch('/jobs/:id/status',          ctrl.updateStatus);
+router.post('/jobs/:id/find-hr',          planGuard('pro', 'team'), requireCredits('HUNTER_LOOKUP'), ctrl.findHR);
+router.delete('/jobs/:id',                ctrl.deleteJob);
+router.post('/jobs/:id/deep-evaluate',    planGuard('pro', 'team'), requireCredits('DEEP_EVALUATE'),    ctrl.deepEvaluate);
+router.post('/jobs/:id/interview-prep',   planGuard('pro', 'team'), requireCredits('INTERVIEW_PREP'),   ctrl.generateInterviewPrep);
+router.get ('/jobs/:id/explain',          requireCredits('AI_ANALYSIS'), ctrl.explainMatch);
+router.get ('/jobs/:id/company',          requireCredits('AI_ANALYSIS'), ctrl.getCompanyResearch);
+router.get ('/jobs/:id/description',      ctrl.fetchDescription);
 router.get ('/unread-count',       ctrl.getUnreadCount);
 router.get ('/alerts/settings',   ctrl.getAlertSettings);
 router.patch('/alerts/settings',  ctrl.updateAlertSettings);

@@ -13,6 +13,8 @@ router.post  ('/bulk',            ctrl.bulkSend);              // credits checke
 router.post  ('/optimize-resume', planGuard('pro', 'team'), requireCredits('RESUME_KEYWORD_OPT'), ctrl.optimizeResume);
 router.post  ('/auto-outreach',   planGuard('pro', 'team'), ctrl.autoOutreach);
 router.get   ('/stats',           ctrl.getStats);
+router.get   ('/generate-latex',      ctrl.generateLatex);
+router.get   ('/generate-resume-pdf', ctrl.generateResumePdf);
 router.delete('/:id',             ctrl.deleteEmail);
 
 module.exports = router;

@@ -546,6 +546,133 @@ exports.getUnreadCount = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Deep evaluate a LinkedIn job (A-F scoring) ───────────────────
+exports.deepEvaluate = async (req, res, next) => {
+  try {
+    const job = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id }).lean();
+    if (!job) throw new NotFoundError('Job not found');
+
+    if (job.deepEval?.generatedAt) {
+      const age = Date.now() - new Date(job.deepEval.generatedAt).getTime();
+      if (age < 7 * 24 * 60 * 60 * 1000) return success(res, job.deepEval, 'Using cached evaluation');
+    }
+
+    const User = require('../models/User');
+    const user = await User.findById(req.user._id).lean();
+
+    const { deepEvaluateJob } = require('../services/ai/jobAnalyzer.service');
+    const evalResult = await deepEvaluateJob({ job, user });
+
+    await LinkedInJob.updateOne(
+      { _id: req.params.id },
+      { $set: { deepEval: { ...evalResult, generatedAt: new Date() } } }
+    );
+
+    return success(res, evalResult);
+  } catch (err) { next(err); }
+};
+
+// ── Generate interview prep for a LinkedIn job ────────────────────
+exports.generateInterviewPrep = async (req, res, next) => {
+  try {
+    const job = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id }).lean();
+    if (!job) throw new NotFoundError('Job not found');
+
+    if (job.interviewPrep?.generatedAt) {
+      const age = Date.now() - new Date(job.interviewPrep.generatedAt).getTime();
+      if (age < 14 * 24 * 60 * 60 * 1000) return success(res, job.interviewPrep, 'Using cached prep');
+    }
+
+    const User = require('../models/User');
+    const user = await User.findById(req.user._id).lean();
+
+    const { generateInterviewPrep } = require('../services/ai/jobAnalyzer.service');
+    const prep = await generateInterviewPrep({ job, user });
+
+    await LinkedInJob.updateOne(
+      { _id: req.params.id },
+      { $set: { interviewPrep: { ...prep, generatedAt: new Date() } } }
+    );
+
+    return success(res, prep);
+  } catch (err) { next(err); }
+};
+
+// ── Explain match score for a LinkedIn job ────────────────────────
+exports.explainMatch = async (req, res, next) => {
+  try {
+    const job = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id }).lean();
+    if (!job) throw new NotFoundError('Job not found');
+
+    const User = require('../models/User');
+    const user = await User.findById(req.user._id).lean();
+
+    const { explainMatch } = require('../services/ai/jobAnalyzer.service');
+    const explanation = await explainMatch({ job, user });
+    return success(res, explanation);
+  } catch (err) { next(err); }
+};
+
+// ── Company research for a LinkedIn job ──────────────────────────
+exports.getCompanyResearch = async (req, res, next) => {
+  try {
+    const job = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id }).lean();
+    if (!job) throw new NotFoundError('Job not found');
+
+    const { researchCompany } = require('../services/ai/jobAnalyzer.service');
+    const { extractDomain }   = require('../services/emailFinder/pattern.service');
+    const domain = extractDomain(job.company);
+    const research = await researchCompany({ company: job.company, domain });
+    return success(res, research);
+  } catch (err) { next(err); }
+};
+
+// ── Fetch & cache job description by scraping LinkedIn URL ────────
+exports.fetchDescription = async (req, res, next) => {
+  try {
+    const job = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!job) throw new NotFoundError('Job not found');
+
+    // Return cached description if already stored
+    if (job.description) return success(res, { description: job.description });
+
+    if (!job.url) return success(res, { description: null }, 'No URL to fetch description from');
+
+    const axios   = require('axios');
+    const cheerio = require('cheerio');
+
+    const { data: html } = await axios.get(job.url, {
+      headers: {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      timeout: 12000,
+    });
+
+    const $ = cheerio.load(html);
+
+    // Try multiple LinkedIn description selectors in priority order
+    let description =
+      $('.show-more-less-html__markup').text().trim()   ||
+      $('.description__text').text().trim()             ||
+      $('div[class*="description"]').first().text().trim() ||
+      '';
+
+    // Clean up whitespace artifacts from HTML parsing
+    description = description.replace(/\s{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+
+    if (description.length > 50) {
+      await LinkedInJob.findByIdAndUpdate(req.params.id, { description });
+    }
+
+    return success(res, { description: description || null });
+  } catch (err) {
+    logger.warn(`LinkedIn description fetch failed for ${req.params.id}: ${err.message}`);
+    return success(res, { description: null }, 'Could not fetch description');
+  }
+};
+
 // ── Disconnect Gmail ──────────────────────────────────────────────
 exports.gmailDisconnect = async (req, res, next) => {
   try {

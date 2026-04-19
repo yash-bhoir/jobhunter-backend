@@ -14,11 +14,13 @@ exports.getJobs = async (req, res, next) => {
     const source = req.query.source || null;
     const remote = req.query.remote || null;
 
-    const searchId = req.query.searchId || null;
+    const searchId     = req.query.searchId     || null;
+    const excludeSource = req.query.excludeSource || null;
 
     const filter = { userId: req.user._id };
     if (status)   filter.status   = status;
     if (source)   filter.source   = source;
+    else if (excludeSource) filter.source = { $ne: excludeSource };
     if (remote !== null) filter.remote = remote === 'true';
     if (searchId) filter.searchId = searchId;
 
@@ -28,16 +30,29 @@ exports.getJobs = async (req, res, next) => {
         ? { createdAt: -1 }
         : { matchScore: -1 };
 
-    const [jobs, total] = await Promise.all([
+    const [jobs, total, platformAgg] = await Promise.all([
       Job.find(filter).sort(sortObj).skip(skip).limit(limit).lean(),
       Job.countDocuments(filter),
+      // Platform breakdown on page 1 only
+      page === 1
+        ? Job.aggregate([
+            { $match: filter },
+            { $group: { _id: '$source', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+          ]).catch(() => null)
+        : Promise.resolve(null),
     ]);
+
+    const platformBreakdown = platformAgg
+      ? Object.fromEntries(platformAgg.map(p => [p._id || 'Unknown', p.count]))
+      : undefined;
 
     return paginated(res, jobs, {
       total, page, limit,
       pages:   Math.ceil(total / limit),
       hasNext: page * limit < total,
       hasPrev: page > 1,
+      ...(platformBreakdown ? { platformBreakdown } : {}),
     });
   } catch (err) {
     next(err);

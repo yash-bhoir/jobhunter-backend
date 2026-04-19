@@ -15,7 +15,9 @@ const outreachEmailSchema = new mongoose.Schema({
   senderEmail:   String,
   aiGenerated:    { type: Boolean, default: false },
   tokensUsed:     Number,
-  resumeAttached: { type: Boolean, default: false },
+  resumeAttached:  { type: Boolean, default: false },
+  latexTemplate:   { type: String, default: null },   // LaTeX source saved at send time
+  resumeSnapshot:  { type: String, default: null },   // base64 PDF snapshot at send time
 }, { timestamps: true });
 
 outreachEmailSchema.index({ userId: 1, createdAt: -1 });

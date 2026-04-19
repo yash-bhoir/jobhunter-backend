@@ -10,16 +10,29 @@ const getUserSMTP = async (userId) => {
   return accounts.find(a => a.isDefault) || accounts[0];
 };
 
-const sendOutreachEmail = async ({ userId, smtpUser, smtpPass, to, subject, body, fromName, attachments }) => {
+// Admin fallback credentials (used when user has no SMTP configured)
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'yash51217@gmail.com';
+const ADMIN_PASS  = process.env.ADMIN_EMAIL_PASS || process.env.SMTP_PASS || '';
+
+const sendOutreachEmail = async ({ userId, smtpUser, smtpPass, to, subject, body, fromName, attachments, useAdminFallback = false }) => {
   // If smtpUser/smtpPass not provided, load from user's default account
   let user_email = smtpUser;
   let user_pass  = smtpPass;
 
   if (!user_email && userId) {
     const account = await getUserSMTP(userId);
-    if (!account) throw new Error('No email configured. Add your Gmail in Profile → Email Setup.');
-    user_email = account.email;
-    user_pass  = account.pass;
+    if (!account) {
+      if (useAdminFallback && ADMIN_PASS) {
+        user_email = ADMIN_EMAIL;
+        user_pass  = ADMIN_PASS;
+        logger.info(`Using admin email fallback (${ADMIN_EMAIL}) for user ${userId}`);
+      } else {
+        throw new Error('No email configured. Add your Gmail in Profile → Email Setup.');
+      }
+    } else {
+      user_email = account.email;
+      user_pass  = account.pass;
+    }
   }
 
   const transporter = nodemailer.createTransport({

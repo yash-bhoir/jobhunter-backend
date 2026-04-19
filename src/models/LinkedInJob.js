@@ -31,6 +31,10 @@ const linkedInJobSchema = new mongoose.Schema({
     email:    String,
   }],
 
+  // AI features
+  deepEval:      { type: mongoose.Schema.Types.Mixed },
+  interviewPrep: { type: mongoose.Schema.Types.Mixed },
+
 }, { timestamps: true });
 
 linkedInJobSchema.index({ userId: 1, createdAt: -1 });
