@@ -145,20 +145,87 @@ if (process.env.NODE_ENV === 'development') {
     try {
       const PlatformConfig = require('../models/PlatformConfig');
       const defaults = [
-        { key: 'maintenanceMode',      value: { enabled: false }, category: 'features' },
-        { key: 'registrationsEnabled', value: true,               category: 'features' },
-        { key: 'enabledPlatforms',     value: ['jsearch','adzuna','remoteok','remotive','arbeitnow','jobicy','himalayas','themuse'], category: 'apis' },
-        { key: 'freePlanLimits',       value: { searchesPerDay: 2,   jobsPerSearch: 10, emailsPerMonth: 10  }, category: 'limits' },
-        { key: 'proPlanLimits',        value: { searchesPerDay: 999, jobsPerSearch: 30, emailsPerMonth: 999, hrLookupsPerMonth: 50  }, category: 'limits' },
-        { key: 'teamPlanLimits',       value: { searchesPerDay: 999, jobsPerSearch: 50, emailsPerMonth: 9999, hrLookupsPerMonth: 200 }, category: 'limits' },
-        { key: 'creditCosts',          value: { JOB_SEARCH: 10, HUNTER_LOOKUP: 15, APOLLO_SEARCH: 10, AI_EMAIL: 5, RESUME_PARSE: 20, EMAIL_SEND: 2, EXCEL_EXPORT: 5 }, category: 'credits' },
-        { key: 'proPlanPrice',         value: 499,  category: 'billing' },
-        { key: 'teamPlanPrice',        value: 1999, category: 'billing' },
-        { key: 'aiEmailEnabled',       value: true, category: 'features' },
-        { key: 'resumeParseEnabled',   value: true, category: 'features' },
-        { key: 'hunterEnabled',        value: true, category: 'features' },
-        { key: 'banner',               value: { active: false }, category: 'general' },
+        // ── Features ────────────────────────────────────────────────
+        { key: 'maintenanceMode',      value: { enabled: false },  category: 'features' },
+        { key: 'registrationsEnabled', value: true,                category: 'features' },
+        { key: 'aiEmailEnabled',       value: true,                category: 'features' },
+        { key: 'resumeParseEnabled',   value: true,                category: 'features' },
+        { key: 'hunterEnabled',        value: true,                category: 'features' },
+        { key: 'apolloEnabled',        value: true,                category: 'features' },
+        { key: 'excelExportEnabled',   value: true,                category: 'features' },
+        { key: 'careerScannerEnabled', value: true,                category: 'features' },
+        { key: 'linkedinAlertsEnabled',value: true,                category: 'features' },
+        { key: 'banner',               value: { active: false },   category: 'general'  },
+
+        // ── Enabled platforms ────────────────────────────────────────
+        { key: 'enabledPlatforms', value: [
+            'jsearch','adzuna','remoteok','remotive',
+            'arbeitnow','jobicy','himalayas','themuse','careerjet',
+          ], category: 'apis' },
+
+        // ── Credit costs per action ──────────────────────────────────
+        { key: 'creditCosts', value: {
+            JOB_SEARCH:          10,
+            HUNTER_LOOKUP:       15,
+            APOLLO_SEARCH:       10,
+            AI_EMAIL:             5,
+            RESUME_PARSE:        20,
+            RESUME_KEYWORD_OPT:   3,
+            AI_ANALYSIS:          3,
+            DEEP_EVALUATE:        8,
+            EMAIL_SEND:           2,
+            EXCEL_EXPORT:         5,
+            INTERVIEW_PREP:       3,
+            PROXYCURL:           30,
+          }, category: 'credits' },
+
+        // ── Plan limits ──────────────────────────────────────────────
+        { key: 'freePlanLimits', value: {
+            creditsPerMonth:   100,
+            searchesPerDay:    2,
+            jobsPerSearch:     10,
+            emailsPerMonth:    10,
+            hrLookupsPerMonth: 0,
+            linkedinLookups:   0,
+            historyDays:       7,
+            graceCredits:      0,
+          }, category: 'limits' },
+        { key: 'proPlanLimits', value: {
+            creditsPerMonth:   1000,
+            searchesPerDay:    999,
+            jobsPerSearch:     30,
+            emailsPerMonth:    999,
+            hrLookupsPerMonth: 50,
+            linkedinLookups:   0,
+            historyDays:       90,
+            graceCredits:      50,
+          }, category: 'limits' },
+        { key: 'teamPlanLimits', value: {
+            creditsPerMonth:   5000,
+            searchesPerDay:    999,
+            jobsPerSearch:     50,
+            emailsPerMonth:    9999,
+            hrLookupsPerMonth: 200,
+            linkedinLookups:   100,
+            historyDays:       365,
+            graceCredits:      100,
+          }, category: 'limits' },
+
+        // ── Billing ──────────────────────────────────────────────────
+        { key: 'proPlanPrice',       value: 499,   category: 'billing' },
+        { key: 'proPlanPriceAnnual', value: 3999,  category: 'billing' },
+        { key: 'teamPlanPrice',      value: 1999,  category: 'billing' },
+        { key: 'teamPlanPriceAnnual',value: 15999, category: 'billing' },
+
+        // ── Top-up packs ─────────────────────────────────────────────
+        { key: 'topupPacks', value: [
+            { name: 'Starter',    credits: 50,   price: 99   },
+            { name: 'Power',      credits: 200,  price: 299,  popular: true },
+            { name: 'Mega',       credits: 600,  price: 699  },
+            { name: 'Enterprise', credits: 2000, price: 1999 },
+          ], category: 'billing' },
       ];
+
       for (const d of defaults) {
         await PlatformConfig.findOneAndUpdate({ key: d.key }, d, { upsert: true });
       }

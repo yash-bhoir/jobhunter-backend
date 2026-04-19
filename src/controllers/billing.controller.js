@@ -132,22 +132,36 @@ exports.getHistory = async (req, res, next) => {
 // ── Get plans ─────────────────────────────────────────────────────
 exports.getPlans = async (req, res, next) => {
   try {
-    const { getAppConfig } = require('../utils/appConfig');
-    const [proPlanPrice, teamPlanPrice, freeLimits, proLimits, teamLimits, creditCosts] = await Promise.all([
+    const { getAppConfig, getCreditCosts } = require('../utils/appConfig');
+    const [
+      proPlanPrice, proPlanPriceAnnual,
+      teamPlanPrice, teamPlanPriceAnnual,
+      freeLimits, proLimits, teamLimits,
+      creditCosts, topupPacks,
+    ] = await Promise.all([
       getAppConfig('proPlanPrice'),
+      getAppConfig('proPlanPriceAnnual'),
       getAppConfig('teamPlanPrice'),
+      getAppConfig('teamPlanPriceAnnual'),
       getAppConfig('freePlanLimits'),
       getAppConfig('proPlanLimits'),
       getAppConfig('teamPlanLimits'),
-      getAppConfig('creditCosts'),
+      getCreditCosts(),
+      getAppConfig('topupPacks'),
     ]);
     return success(res, {
-      proPlanPrice:  proPlanPrice  ?? 499,
-      teamPlanPrice: teamPlanPrice ?? 1999,
-      freeCredits:   freeLimits?.creditsPerMonth  ?? 100,
-      proCredits:    proLimits?.creditsPerMonth   ?? 1000,
-      teamCredits:   teamLimits?.creditsPerMonth  ?? 5000,
-      creditCosts:   creditCosts ?? {},
+      proPlanPrice:        proPlanPrice        ?? 499,
+      proPlanPriceAnnual:  proPlanPriceAnnual  ?? 3999,
+      teamPlanPrice:       teamPlanPrice       ?? 1999,
+      teamPlanPriceAnnual: teamPlanPriceAnnual ?? 15999,
+      freeCredits:   freeLimits?.creditsPerMonth ?? 100,
+      proCredits:    proLimits?.creditsPerMonth  ?? 1000,
+      teamCredits:   teamLimits?.creditsPerMonth ?? 5000,
+      freeLimits:    freeLimits  ?? {},
+      proLimits:     proLimits   ?? {},
+      teamLimits:    teamLimits  ?? {},
+      creditCosts,
+      topupPacks:    topupPacks ?? [],
     });
   } catch (err) {
     next(err);

@@ -3,16 +3,21 @@
  * All consumers call getAppConfig(key) instead of hardcoded constants.
  */
 const { cache }        = require('../config/redis');
-const { CREDIT_COSTS, PLAN_CREDITS, PLAN_LIMITS } = require('./constants');
+const { CREDIT_COSTS, PLAN_CREDITS, PLAN_LIMITS, PLAN_PRICING, TOPUP_PACKS } = require('./constants');
 
 const CACHE_TTL = 300; // 5 minutes
 
 const DEFAULTS = {
-  creditCosts:    CREDIT_COSTS,
-  planCredits:    PLAN_CREDITS,
-  freePlanLimits: { creditsPerMonth: PLAN_CREDITS.free,  searchesPerDay: PLAN_LIMITS.free?.searchesPerDay  || 2 },
-  proPlanLimits:  { creditsPerMonth: PLAN_CREDITS.pro,   searchesPerDay: PLAN_LIMITS.pro?.searchesPerDay   || 999 },
-  teamPlanLimits: { creditsPerMonth: PLAN_CREDITS.team,  searchesPerDay: PLAN_LIMITS.team?.searchesPerDay  || 999 },
+  creditCosts:         CREDIT_COSTS,
+  planCredits:         PLAN_CREDITS,
+  proPlanPrice:        PLAN_PRICING.pro.monthly,
+  proPlanPriceAnnual:  PLAN_PRICING.pro.annual,
+  teamPlanPrice:       PLAN_PRICING.team.monthly,
+  teamPlanPriceAnnual: PLAN_PRICING.team.annual,
+  topupPacks:          TOPUP_PACKS,
+  freePlanLimits:  { ...PLAN_LIMITS.free,  creditsPerMonth: PLAN_CREDITS.free  },
+  proPlanLimits:   { ...PLAN_LIMITS.pro,   creditsPerMonth: PLAN_CREDITS.pro   },
+  teamPlanLimits:  { ...PLAN_LIMITS.team,  creditsPerMonth: PLAN_CREDITS.team  },
 };
 
 /**
