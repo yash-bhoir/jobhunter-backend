@@ -73,6 +73,30 @@ if (process.env.NODE_ENV === 'development') {
     }
   });
 
+  router.get('/dev/set-plan/:email/:plan', async (req, res) => {
+    try {
+      const User        = require('../models/User');
+      const UserCredits = require('../models/UserCredits');
+      const planCredits = { free: 100, pro: 1000, team: 5000 };
+      const plan        = req.params.plan;
+      if (!planCredits[plan]) return res.status(400).json({ success: false, message: 'Invalid plan' });
+      const user = await User.findOneAndUpdate(
+        { email: req.params.email },
+        { plan, role: 'user', status: 'active', emailVerified: true },
+        { new: true }
+      );
+      if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+      await UserCredits.findOneAndUpdate(
+        { userId: user._id },
+        { plan, totalCredits: planCredits[plan], usedCredits: 0 },
+        { upsert: true }
+      );
+      res.json({ success: true, message: `${user.email} set to ${plan} plan` });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   router.get('/dev/make-admin/:email', async (req, res) => {
     try {
       const User        = require('../models/User');

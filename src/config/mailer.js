@@ -172,6 +172,38 @@ const templates = {
       </div>
     `,
   }),
+
+  errorAlert: ({ method, endpoint, statusCode, errorCode, message, stack, userId, userEmail, ip, userAgent, timestamp }) => ({
+    subject: `🚨 [${statusCode}] ${method} ${endpoint} — JobHunter Error`,
+    html: `
+      <div style="font-family:monospace;max-width:700px;margin:0 auto;padding:20px;background:#0f172a;color:#e2e8f0;border-radius:8px">
+        <div style="background:#ef4444;color:white;padding:10px 16px;border-radius:6px;margin-bottom:16px">
+          <strong style="font-size:16px">⚠ Server Error — ${statusCode} ${errorCode}</strong>
+        </div>
+
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <tr><td style="color:#94a3b8;padding:4px 8px;width:130px">Time</td>       <td style="color:#f1f5f9;padding:4px 8px">${timestamp}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">Endpoint</td>   <td style="color:#f1f5f9;padding:4px 8px"><strong>${method}</strong> ${endpoint}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">Status</td>     <td style="color:#fca5a5;padding:4px 8px">${statusCode} — ${errorCode}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">Message</td>    <td style="color:#fbbf24;padding:4px 8px">${message}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">User ID</td>    <td style="color:#f1f5f9;padding:4px 8px">${userId || '—'}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">User Email</td> <td style="color:#f1f5f9;padding:4px 8px">${userEmail || '—'}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">IP</td>         <td style="color:#f1f5f9;padding:4px 8px">${ip || '—'}</td></tr>
+          <tr><td style="color:#94a3b8;padding:4px 8px">User Agent</td> <td style="color:#94a3b8;padding:4px 8px;font-size:11px">${userAgent || '—'}</td></tr>
+        </table>
+
+        ${stack ? `
+        <div style="margin-top:16px">
+          <div style="color:#94a3b8;font-size:11px;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">Stack Trace</div>
+          <pre style="background:#1e293b;color:#f87171;padding:12px;border-radius:6px;font-size:11px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0">${stack.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+        </div>` : ''}
+
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid #1e293b;font-size:11px;color:#475569;text-align:center">
+          JobHunter Error Monitor · ${new Date().getFullYear()}
+        </div>
+      </div>
+    `,
+  }),
 };
 
 module.exports = { sendEmail, templates };

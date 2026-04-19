@@ -1,6 +1,20 @@
 const logger      = require('../config/logger');
 const ErrorLog    = require('../models/ErrorLog');
 const UserCredits = require('../models/UserCredits');
+const { sendEmail, templates } = require('../config/mailer');
+
+// Rate-limit error emails: max 1 per unique (method+endpoint+code) per 2 minutes
+// Prevents flooding if a broken endpoint gets hammered
+const _errorEmailCache = new Map();
+const ALERT_COOLDOWN_MS = 2 * 60 * 1000;
+
+function shouldSendErrorEmail(method, endpoint, code) {
+  const key = `${method}:${endpoint}:${code}`;
+  const lastSent = _errorEmailCache.get(key);
+  if (lastSent && Date.now() - lastSent < ALERT_COOLDOWN_MS) return false;
+  _errorEmailCache.set(key, Date.now());
+  return true;
+}
 
 // Severity based on status code
 const getSeverity = (statusCode) => {
@@ -89,6 +103,29 @@ const errorHandler = (err, req, res, _next) => {
       body:   process.env.NODE_ENV === 'development' ? req.body : '[hidden]',
       stack:  err.stack,
     });
+
+    // ── Email alert to admin ──────────────────────────────────────
+    const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.ADMIN_EMAIL;
+    if (adminEmail && shouldSendErrorEmail(req.method, req.originalUrl, code)) {
+      const alertData = {
+        method:    req.method,
+        endpoint:  req.originalUrl,
+        statusCode,
+        errorCode: code,
+        message,
+        stack:     err.stack || null,
+        userId:    req.user?._id?.toString() || null,
+        userEmail: req.user?.email           || null,
+        ip:        req.ip || req.connection?.remoteAddress || null,
+        userAgent: req.headers?.['user-agent'] || null,
+        timestamp: new Date().toISOString(),
+      };
+      sendEmail({
+        to:      adminEmail,
+        subject: templates.errorAlert(alertData).subject,
+        html:    templates.errorAlert(alertData).html,
+      }).catch(e => logger.warn(`Error alert email failed: ${e.message}`));
+    }
   } else if (statusCode >= 400) {
     logger.warn(`[${req.method}] ${req.originalUrl} — ${statusCode} ${message}`);
   }
