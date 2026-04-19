@@ -2,7 +2,7 @@ const UserCredits = require('../models/UserCredits');
 const ActivityLog = require('../models/ActivityLog');
 const { CreditError, ForbiddenError } = require('../utils/errors');
 const { CREDIT_BREAKDOWN_MAP, PLAN_LIMITS, PLAN_CREDITS } = require('../utils/constants');
-const { getCreditCosts } = require('../utils/appConfig');
+const { getCreditCosts, getAppConfig } = require('../utils/appConfig');
 const { sendEmail, templates } = require('../config/mailer');
 const logger = require('../config/logger');
 
@@ -27,8 +27,10 @@ const planGuard = (...allowedPlans) => (req, _res, next) => {
 // ── Guard: enforce per-plan daily search limit ────────────────────
 const checkDailySearchLimit = async (req, _res, next) => {
   try {
-    const userPlan = req.user?.plan || 'free';
-    const limit    = PLAN_LIMITS[userPlan]?.searchesPerDay ?? 999;
+    const userPlan  = req.user?.plan || 'free';
+    const planKey   = `${userPlan}PlanLimits`;
+    const dbLimits  = await getAppConfig(planKey);
+    const limit     = dbLimits?.searchesPerDay ?? PLAN_LIMITS[userPlan]?.searchesPerDay ?? 999;
     if (limit >= 999) return next(); // pro/team: unlimited
 
     const JobSearch  = require('../models/JobSearch');
@@ -63,10 +65,13 @@ const requireCredits = (action) => async (req, _res, next) => {
 
     // Create if not exists — always include resetDate so monthly cron has a baseline
     if (!credits) {
+      const planKey    = `${req.user.plan || 'free'}PlanLimits`;
+      const dbLimits   = await getAppConfig(planKey);
+      const planCreds  = dbLimits?.creditsPerMonth ?? PLAN_CREDITS[req.user.plan || 'free'];
       credits = await UserCredits.create({
         userId:       req.user._id,
         plan:         req.user.plan || 'free',
-        totalCredits: PLAN_CREDITS[req.user.plan || 'free'],
+        totalCredits: planCreds,
         resetDate:    getNextMonthReset(),
         lastResetAt:  new Date(),
       });

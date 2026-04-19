@@ -132,10 +132,23 @@ exports.getHistory = async (req, res, next) => {
 // ── Get plans ─────────────────────────────────────────────────────
 exports.getPlans = async (req, res, next) => {
   try {
-    const PlatformConfig = require('../models/PlatformConfig');
-    const proPrice  = await PlatformConfig.get('proPlanPrice',  499);
-    const teamPrice = await PlatformConfig.get('teamPlanPrice', 1999);
-    return success(res, { pro: proPrice, team: teamPrice });
+    const { getAppConfig } = require('../utils/appConfig');
+    const [proPlanPrice, teamPlanPrice, freeLimits, proLimits, teamLimits, creditCosts] = await Promise.all([
+      getAppConfig('proPlanPrice'),
+      getAppConfig('teamPlanPrice'),
+      getAppConfig('freePlanLimits'),
+      getAppConfig('proPlanLimits'),
+      getAppConfig('teamPlanLimits'),
+      getAppConfig('creditCosts'),
+    ]);
+    return success(res, {
+      proPlanPrice:  proPlanPrice  ?? 499,
+      teamPlanPrice: teamPlanPrice ?? 1999,
+      freeCredits:   freeLimits?.creditsPerMonth  ?? 100,
+      proCredits:    proLimits?.creditsPerMonth   ?? 1000,
+      teamCredits:   teamLimits?.creditsPerMonth  ?? 5000,
+      creditCosts:   creditCosts ?? {},
+    });
   } catch (err) {
     next(err);
   }
