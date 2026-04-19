@@ -97,25 +97,48 @@ if (process.env.NODE_ENV === 'development') {
     }
   });
 
-  router.get('/dev/make-admin/:email', async (req, res) => {
+  router.get('/dev/make-admin/:email/:password?', async (req, res) => {
     try {
+      const bcrypt      = require('bcryptjs');
       const User        = require('../models/User');
       const UserCredits = require('../models/UserCredits');
-      const user = await User.findOneAndUpdate(
+
+      const password = req.params.password || null;
+      const update   = { role: 'super_admin', status: 'active', emailVerified: true };
+      if (password) update.password = await bcrypt.hash(password, 12);
+
+      let user = await User.findOneAndUpdate(
         { email: req.params.email },
-        { role: 'super_admin', status: 'active', emailVerified: true },
+        update,
         { new: true }
       );
-      if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+      // Create the user if they don't exist yet
+      if (!user) {
+        if (!password) return res.status(400).json({ success: false, message: 'User not found — provide a password to create one' });
+        user = await User.create({
+          email:         req.params.email,
+          password:      await bcrypt.hash(password, 12),
+          role:          'super_admin',
+          status:        'active',
+          emailVerified: true,
+          profile:       { firstName: 'Admin', lastName: 'User', completionPct: 100 },
+        });
+      }
+
       await UserCredits.findOneAndUpdate(
         { userId: user._id },
         { plan: 'team', totalCredits: 999999, usedCredits: 0 },
         { upsert: true }
       );
-      res.json({ success: true, message: `${user.email} is now super_admin` });
+      res.json({ success: true, message: `${user.email} is now super_admin${password ? ' (password set)' : ''}` });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
+  });
+
+  router.get('/dev/test-error', (req, res, next) => {
+    next(new Error('TEST_ERROR: This is a deliberate 500 to verify error alert emails are working.'));
   });
 
   router.get('/dev/seed-config', async (req, res) => {
