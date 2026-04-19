@@ -162,12 +162,13 @@ exports.buyTopup = async (req, res, next) => {
     if (!credits || !amount) throw new ValidationError('Credits and amount required');
 
     if (!process.env.RAZORPAY_KEY_ID) {
-      // Demo mode — just add credits
+      // Demo mode — add credits directly
       await UserCredits.findOneAndUpdate(
         { userId: req.user._id },
-        { $inc: { topupCredits: credits } }
+        { $inc: { topupCredits: credits } },
+        { upsert: true }
       );
-      return success(res, { credits }, `${credits} credits added (demo mode)`);
+      return success(res, { credits, demo: true }, `${credits} credits added (demo mode)`);
     }
 
     const order = await createOrder({
@@ -177,6 +178,50 @@ exports.buyTopup = async (req, res, next) => {
     });
 
     return success(res, { ...order, credits });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Verify top-up payment ─────────────────────────────────────────
+exports.verifyTopup = async (req, res, next) => {
+  try {
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      credits,
+    } = req.body;
+
+    if (!credits || credits <= 0) throw new ValidationError('Invalid credits amount');
+
+    const isValid = verifyPayment(
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature
+    );
+
+    if (!isValid) throw new ValidationError('Payment verification failed — invalid signature');
+
+    await UserCredits.findOneAndUpdate(
+      { userId: req.user._id },
+      { $inc: { topupCredits: credits } },
+      { upsert: true }
+    );
+
+    // Log in subscription history so it appears in payment history
+    await Subscription.create({
+      userId:          req.user._id,
+      plan:            'topup',
+      status:          'active',
+      razorpayOrderId: razorpay_order_id,
+      amount:          Math.round(credits * 1.5), // approximate price
+      currency:        'INR',
+      startDate:       new Date(),
+    });
+
+    logger.info(`Topup verified: ${req.user.email} +${credits} credits`);
+    return success(res, { credits }, `${credits} credits added successfully!`);
   } catch (err) {
     next(err);
   }

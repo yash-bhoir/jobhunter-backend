@@ -11,5 +11,6 @@ router.get ('/history',        ctrl.getHistory);
 router.get ('/plans',          ctrl.getPlans);
 router.post('/cancel',         ctrl.cancelSubscription);
 router.post('/topup',          ctrl.buyTopup);
+router.post('/verify-topup',   ctrl.verifyTopup);
 
 module.exports = router;
