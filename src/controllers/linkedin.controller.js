@@ -287,6 +287,7 @@ exports.gmailConnect = async (req, res, next) => {
       access_type: 'offline',
       scope: [
         'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.send',
         'https://www.googleapis.com/auth/userinfo.email',
       ],
       state:  req.user._id.toString(),
@@ -362,8 +363,8 @@ exports.fetchFromGmail = async (req, res, next) => {
       });
     }
 
-    const { fetchLinkedInAlertEmails } = require('../services/linkedin/emailParser.service');
-    const { score }                    = require('../services/jobSearch/scorer');
+    const { fetchJobAlertEmails } = require('../services/linkedin/emailParser.service');
+    const { score }               = require('../services/jobSearch/scorer');
 
     // Setup OAuth client with stored tokens
     const oauth2Client = new google.auth.OAuth2(
@@ -375,19 +376,16 @@ exports.fetchFromGmail = async (req, res, next) => {
       refresh_token: user.gmailRefreshToken,
     });
 
-    // Get fresh access token
+    // Get fresh access token (refresh if expired)
     const { token } = await oauth2Client.getAccessToken();
     const accessToken = token || user.gmailAccessToken;
 
-    // Update stored token if refreshed
     if (token && token !== user.gmailAccessToken) {
-      await User.findByIdAndUpdate(req.user._id, {
-        gmailAccessToken: token,
-      });
+      await User.findByIdAndUpdate(req.user._id, { gmailAccessToken: token });
     }
 
-    // Fetch and parse LinkedIn alert emails
-    const rawJobs = await fetchLinkedInAlertEmails(accessToken, 10);
+    // Fetch from ALL job portals (LinkedIn, Naukri, Indeed, Foundit, etc.)
+    const rawJobs = await fetchJobAlertEmails(accessToken, 20);
 
     if (rawJobs.length === 0) {
       return success(res, {
