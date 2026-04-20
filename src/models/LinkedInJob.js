@@ -22,6 +22,9 @@ const linkedInJobSchema = new mongoose.Schema({
   recruiterEmail:    String,
   recruiterName:     String,
   recruiterLinkedIn: String,
+  careerPageUrl:     String,
+  linkedinUrl:       String,
+  employeeSearch:    String,
 
   // Employees from Apollo
   employees: [{

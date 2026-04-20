@@ -148,28 +148,43 @@ exports.findHR = async (req, res, next) => {
       logger.warn(`Apollo search failed for ${job.company}: ${err.message}`);
     }
 
-    await LinkedInJob.findByIdAndUpdate(job._id, {
-      recruiterEmail:    contacts?.emails?.[0]?.email    || job.recruiterEmail,
-      recruiterName:     contacts?.emails?.[0]?.name     || job.recruiterName,
-      recruiterLinkedIn: contacts?.emails?.[0]?.linkedin || job.recruiterLinkedIn,
-      employees: employees.map(e => ({
-        name:     e.name     || '',
-        title:    e.title    || '',
-        linkedin: e.linkedin || null,
-        email:    e.email    || null,
-      })),
-    });
+    const update = {
+      // Always persist links — available for all plans
+      ...(contacts?.careerPageUrl  && { careerPageUrl:  contacts.careerPageUrl  }),
+      ...(contacts?.linkedinUrl    && { linkedinUrl:    contacts.linkedinUrl    }),
+      ...(contacts?.employeeSearch && { employeeSearch: contacts.employeeSearch }),
+      // Emails — only set if found
+      ...(contacts?.emails?.[0]?.email && {
+        recruiterEmail:    contacts.emails[0].email,
+        recruiterName:     contacts.emails[0].name     || '',
+        recruiterLinkedIn: contacts.emails[0].linkedin || '',
+      }),
+      // Employees
+      ...(employees.length > 0 && {
+        employees: employees.map(e => ({
+          name:     e.name     || '',
+          title:    e.title    || '',
+          linkedin: e.linkedin || null,
+          email:    e.email    || null,
+        })),
+      }),
+    };
+
+    await LinkedInJob.findByIdAndUpdate(job._id, update);
 
     logger.info(
       `HR found for ${job.company}: ` +
-      `${contacts?.emails?.length || 0} emails, ${employees.length} employees`
+      `${contacts?.emails?.length || 0} emails, ${employees.length} employees, ` +
+      `careerPage: ${!!contacts?.careerPageUrl}`
     );
 
     return success(res, {
-      emails:       contacts?.emails    || [],
+      emails:        contacts?.emails       || [],
       employees,
-      source:       contacts?.source    || 'pattern',
+      source:        contacts?.source       || 'pattern',
       careerPageUrl: contacts?.careerPageUrl || null,
+      linkedinUrl:   contacts?.linkedinUrl   || null,
+      employeeSearch: contacts?.employeeSearch || null,
     }, 'HR contacts found');
   } catch (err) { next(err); }
 };
@@ -706,14 +721,39 @@ exports.fetchDescription = async (req, res, next) => {
           $g('.description__text').html()?.trim()           ||
           $g('[class*="description"]').first().html()?.trim() || '';
 
-        // Also try to enrich company/location if missing
+        // Enrich company/location if missing, then trigger HR search in background
+        let enrichedCompany = job.company;
         if (!job.company) {
           const company = $g('.topcard__org-name-link, .topcard__flavor--black-link').first().text().trim();
-          if (company) await LinkedInJob.findByIdAndUpdate(req.params.id, { company });
+          if (company) {
+            enrichedCompany = company;
+            await LinkedInJob.findByIdAndUpdate(req.params.id, { company });
+          }
         }
         if (!job.location) {
           const location = $g('.topcard__flavor--bullet').first().text().trim();
           if (location) await LinkedInJob.findByIdAndUpdate(req.params.id, { location });
+        }
+
+        // Background HR search now that we have a company name
+        if (enrichedCompany && !job.careerPageUrl) {
+          findHRContacts(enrichedCompany, req.user?.plan || 'free')
+            .then(async (contacts) => {
+              const update = {
+                ...(contacts?.careerPageUrl  && { careerPageUrl:  contacts.careerPageUrl  }),
+                ...(contacts?.linkedinUrl    && { linkedinUrl:    contacts.linkedinUrl    }),
+                ...(contacts?.employeeSearch && { employeeSearch: contacts.employeeSearch }),
+                ...(contacts?.emails?.[0]?.email && {
+                  recruiterEmail: contacts.emails[0].email,
+                  recruiterName:  contacts.emails[0].name || '',
+                }),
+              };
+              if (Object.keys(update).length) {
+                await LinkedInJob.findByIdAndUpdate(req.params.id, update);
+                logger.info(`Background HR enriched for ${enrichedCompany}`);
+              }
+            })
+            .catch(() => {});
         }
       } catch (err) {
         logger.warn(`LinkedIn guest API failed for job ${linkedinJobId}: ${err.message}`);

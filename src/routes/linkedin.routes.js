@@ -14,7 +14,7 @@ router.post('/jobs',                      ctrl.addJob);
 router.post('/fetch',                     ctrl.fetchAlerts);
 router.get ('/jobs/:id',                  ctrl.getJob);
 router.patch('/jobs/:id/status',          ctrl.updateStatus);
-router.post('/jobs/:id/find-hr',          planGuard('pro', 'team'), requireCredits('HUNTER_LOOKUP'), ctrl.findHR);
+router.post('/jobs/:id/find-hr',          ctrl.findHR);
 router.delete('/jobs/:id',                ctrl.deleteJob);
 router.post('/jobs/:id/deep-evaluate',    planGuard('pro', 'team'), requireCredits('DEEP_EVALUATE'),    ctrl.deepEvaluate);
 router.post('/jobs/:id/interview-prep',   planGuard('pro', 'team'), requireCredits('INTERVIEW_PREP'),   ctrl.generateInterviewPrep);
