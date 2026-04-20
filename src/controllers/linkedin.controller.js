@@ -14,8 +14,15 @@ exports.getJobs = async (req, res, next) => {
     const skip   = (page - 1) * limit;
     const status = req.query.status || null;
 
+    const source = req.query.source || null;
+
     const filter = { userId: req.user._id };
     if (status) filter.status = status;
+    if (source === 'email') {
+      filter.source = { $regex: '^email_' };
+    } else if (source) {
+      filter.source = source;
+    }
 
     const [jobs, total] = await Promise.all([
       LinkedInJob.find(filter)
@@ -417,7 +424,7 @@ exports.fetchFromGmail = async (req, res, next) => {
       location:   j.location,
       url:        j.url,
       remote:     j.remote,
-      source:     'linkedin_email_alert',
+      source:     `email_${j.source || 'alert'}`,
       matchScore: j.matchScore || 0,
       status:     'new',
     }));
