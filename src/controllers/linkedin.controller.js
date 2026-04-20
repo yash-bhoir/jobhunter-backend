@@ -1,10 +1,11 @@
-const { google }         = require('googleapis');
-const LinkedInJob        = require('../models/LinkedInJob');
-const { findHRContacts } = require('../services/emailFinder');
-const apollo             = require('../services/emailFinder/apollo.service');
+const { google }             = require('googleapis');
+const LinkedInJob            = require('../models/LinkedInJob');
+const { findHRContacts }     = require('../services/emailFinder');
+const apollo                 = require('../services/emailFinder/apollo.service');
 const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
-const logger = require('../config/logger');
+const logger                 = require('../config/logger');
+const { encrypt, decrypt }   = require('../utils/crypto.util');
 
 // ── Get email-sourced jobs only ───────────────────────────────────
 exports.getEmailJobs = async (req, res, next) => {
@@ -117,9 +118,25 @@ exports.updateStatus = async (req, res, next) => {
     const allowed = ['new', 'saved', 'applied', 'ignored'];
     if (!allowed.includes(status)) throw new ValidationError('Invalid status');
 
+    // Build the update — always stamp statusUpdatedAt; set appliedAt on first apply.
+    const update = { status, statusUpdatedAt: new Date() };
+    if (status === 'applied') {
+      // Only set appliedAt the first time (don't overwrite if already set).
+      // We use $setOnInsert-style logic via the query: only set if null.
+      update.$setOnInsert = undefined; // clean
+    }
+
+    // Fetch current doc so we can check if appliedAt already exists
+    const existing = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id }).select('appliedAt').lean();
+    if (!existing) throw new NotFoundError('Job not found');
+
+    if (status === 'applied' && !existing.appliedAt) {
+      update.appliedAt = new Date();
+    }
+
     const job = await LinkedInJob.findOneAndUpdate(
       { _id: req.params.id, userId: req.user._id },
-      { status },
+      { $set: update },
       { new: true }
     );
     if (!job) throw new NotFoundError('Job not found');
@@ -153,11 +170,24 @@ exports.findHR = async (req, res, next) => {
       ...(contacts?.careerPageUrl  && { careerPageUrl:  contacts.careerPageUrl  }),
       ...(contacts?.linkedinUrl    && { linkedinUrl:    contacts.linkedinUrl    }),
       ...(contacts?.employeeSearch && { employeeSearch: contacts.employeeSearch }),
-      // Emails — only set if found
+      // Primary recruiter (first contact) — kept for backwards compat
       ...(contacts?.emails?.[0]?.email && {
         recruiterEmail:    contacts.emails[0].email,
         recruiterName:     contacts.emails[0].name     || '',
         recruiterLinkedIn: contacts.emails[0].linkedin || '',
+      }),
+      // FIX: all contacts now persisted in allRecruiterContacts[] — previously
+      // only contacts[0] was stored and contacts 1-N were silently discarded.
+      ...(contacts?.emails?.length > 0 && {
+        allRecruiterContacts: contacts.emails.map(e => ({
+          email:      e.email      || '',
+          name:       e.name       || '',
+          title:      e.title      || '',
+          confidence: e.confidence ?? null,
+          source:     e.source     || 'unknown',
+          linkedin:   e.linkedin   || null,
+          status:     e.status     || 'unknown',
+        })),
       }),
       // Employees
       ...(employees.length > 0 && {
@@ -361,11 +391,12 @@ exports.gmailCallback = async (req, res, next) => {
     const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
     const { data: profile } = await oauth2.userinfo.get();
 
-    // Save tokens
+    // Save tokens — encrypt before storing (AES-256-GCM via crypto.util).
+    // Use decrypt() in fetchFromGmail before passing to googleapis.
     const User = require('../models/User');
     await User.findByIdAndUpdate(userId, {
-      gmailAccessToken:  tokens.access_token,
-      gmailRefreshToken: tokens.refresh_token,
+      gmailAccessToken:  encrypt(tokens.access_token),
+      gmailRefreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
       gmailConnectedAt:  new Date(),
       gmailEmail:        profile.email,
     });
@@ -385,6 +416,8 @@ exports.gmailStatus = async (req, res, next) => {
     const user = await User.findById(req.user._id)
       .select('+gmailAccessToken +gmailEmail +gmailConnectedAt +lastGmailFetchAt');
 
+    // gmailAccessToken is stored encrypted — non-empty string means connected.
+    // We do NOT decrypt it here since we only need the boolean connected state.
     return success(res, {
       connected:      !!user?.gmailAccessToken,
       email:          user?.gmailEmail          || null,
@@ -423,23 +456,29 @@ exports.fetchFromGmail = async (req, res, next) => {
     const { fetchJobAlertEmails } = require('../services/linkedin/emailParser.service');
     const { score }               = require('../services/jobSearch/scorer');
 
+    // Decrypt stored tokens before passing to Google OAuth client.
+    // Tokens are stored AES-256-GCM encrypted — decrypt() is safe on legacy
+    // plaintext (returns as-is), so this works during a rolling migration.
+    const { accessToken: rawAccessToken, refreshToken: rawRefreshToken } = user.decryptGmailTokens();
+
     // Setup OAuth client with stored tokens
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
     );
     oauth2Client.setCredentials({
-      access_token:  user.gmailAccessToken,
-      refresh_token: user.gmailRefreshToken,
+      access_token:  rawAccessToken,
+      refresh_token: rawRefreshToken,
     });
 
     // Get fresh access token (refresh if expired)
     let accessToken;
     try {
       const { token } = await oauth2Client.getAccessToken();
-      accessToken = token || user.gmailAccessToken;
-      if (token && token !== user.gmailAccessToken) {
-        await User.findByIdAndUpdate(req.user._id, { gmailAccessToken: token });
+      accessToken = token || rawAccessToken;
+      if (token && token !== rawAccessToken) {
+        // Store new access token encrypted
+        await User.findByIdAndUpdate(req.user._id, { gmailAccessToken: encrypt(token) });
       }
     } catch (err) {
       // Token revoked or expired — clear stored tokens and ask user to reconnect
@@ -523,6 +562,8 @@ exports.fetchFromGmail = async (req, res, next) => {
         const contacts = await findHRContacts(company, req.user.plan);
         if (contacts?.emails?.length > 0) {
           const top = contacts.emails[0];
+          // FIX: now also stores all contacts in allRecruiterContacts[]
+          // Previously only the first contact was persisted; contacts 2-N were lost.
           await LinkedInJob.updateMany(
             { userId: req.user._id, company, recruiterEmail: null },
             {
@@ -530,6 +571,15 @@ exports.fetchFromGmail = async (req, res, next) => {
                 recruiterEmail:    top.email,
                 recruiterName:     top.name,
                 recruiterLinkedIn: top.linkedin || null,
+                allRecruiterContacts: contacts.emails.map(e => ({
+                  email:      e.email      || '',
+                  name:       e.name       || '',
+                  title:      e.title      || '',
+                  confidence: e.confidence ?? null,
+                  source:     e.source     || 'unknown',
+                  linkedin:   e.linkedin   || null,
+                  status:     e.status     || 'unknown',
+                })),
               },
             }
           );

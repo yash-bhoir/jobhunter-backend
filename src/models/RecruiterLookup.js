@@ -35,6 +35,14 @@ const recruiterLookupSchema = new mongoose.Schema({
 });
 
 recruiterLookupSchema.index({ userId: 1, createdAt: -1 });
-recruiterLookupSchema.index({ userId: 1, company:   1 });
+// FIX: was a plain index — changed to unique to prevent duplicate lookup records
+// (and duplicate API credit spend) when findHR is called concurrently on two jobs
+// at the same company.
+// MIGRATION NOTE: if deploying to an existing collection with duplicate entries, run:
+//   db.recruiterlookups.aggregate([
+//     {$group:{_id:{userId:"$userId",company:"$company"},count:{$sum:1},ids:{$push:"$_id"}}},
+//     {$match:{count:{$gt:1}}}
+//   ]).forEach(g => g.ids.slice(1).forEach(id => db.recruiterlookups.deleteOne({_id:id})))
+recruiterLookupSchema.index({ userId: 1, company: 1 }, { unique: true });
 
 module.exports = mongoose.model('RecruiterLookup', recruiterLookupSchema);
