@@ -101,13 +101,18 @@ function parseLinkedIn($) {
     // Location = first text matching city pattern
     const location = texts.find(t => CITY_RE.test(t)) || '';
 
+    const cleanLocation = location.replace(/\s*·\s*.+$/, '').trim();
+    const usedTexts     = new Set([title, company, cleanLocation]);
+    const description   = texts
+      .filter(t => !usedTexts.has(t) && t.length > 20 && !NOISE_RE.test(t) && !CITY_RE.test(t))
+      .slice(0, 3).join(' · ');
+
     jobs.push({
-      title,
-      company,
-      location: location.replace(/\s*·\s*.+$/, '').trim(), // strip "· 2 days ago"
-      url,
-      source:   'linkedin',
-      remote:   /remote/i.test(location),
+      title, company,
+      location: cleanLocation,
+      url, description,
+      source: 'linkedin',
+      remote: /remote/i.test(location),
     });
   });
 

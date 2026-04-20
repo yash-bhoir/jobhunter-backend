@@ -442,15 +442,16 @@ exports.fetchFromGmail = async (req, res, next) => {
     const scored   = score(newJobs, fullUser);
 
     const jobDocs = scored.map(j => ({
-      userId:     req.user._id,
-      title:      j.title,
-      company:    j.company || '',
-      location:   j.location,
-      url:        j.url,
-      remote:     j.remote,
-      source:     `email_${j.source || 'alert'}`,
-      matchScore: j.matchScore || 0,
-      status:     'new',
+      userId:      req.user._id,
+      title:       j.title,
+      company:     j.company || '',
+      location:    j.location || '',
+      url:         j.url || '',
+      description: j.description || '',
+      remote:      j.remote,
+      source:      `email_${j.source || 'alert'}`,
+      matchScore:  j.matchScore || 0,
+      status:      'new',
     }));
 
     let insertedCount = 0;
