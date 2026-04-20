@@ -402,10 +402,10 @@ exports.gmailCallback = async (req, res, next) => {
     });
 
     logger.info(`Gmail connected for user ${userId}: ${profile.email}`);
-    res.redirect(`${process.env.CLIENT_URL}/linkedin?gmail=connected`);
+    res.redirect(`${process.env.CLIENT_URL}/email-jobs?gmail=connected`);
   } catch (err) {
     logger.error(`Gmail callback error: ${err.message}`);
-    res.redirect(`${process.env.CLIENT_URL}/linkedin?gmail=error`);
+    res.redirect(`${process.env.CLIENT_URL}/email-jobs?gmail=error`);
   }
 };
 
