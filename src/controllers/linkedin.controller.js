@@ -681,24 +681,54 @@ exports.fetchDescription = async (req, res, next) => {
 
     const { data: html } = await axios.get(job.url, {
       headers: {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Cache-Control':   'no-cache',
       },
-      timeout: 12000,
+      timeout: 15000,
+      maxRedirects: 5,
     });
 
     const $ = cheerio.load(html);
 
-    // Try multiple LinkedIn description selectors in priority order
-    let description =
-      $('.show-more-less-html__markup').text().trim()   ||
-      $('.description__text').text().trim()             ||
-      $('div[class*="description"]').first().text().trim() ||
-      '';
+    let description = '';
 
-    // Clean up whitespace artifacts from HTML parsing
-    description = description.replace(/\s{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+    // 1. JSON-LD structured data (most reliable — LinkedIn embeds full description here)
+    $('script[type="application/ld+json"]').each((_, el) => {
+      if (description) return;
+      try {
+        const json = JSON.parse($(el).html());
+        if (json.description) description = json.description;
+      } catch {}
+    });
+
+    // 2. Meta / OG tags
+    if (!description) {
+      description =
+        $('meta[name="description"]').attr('content') ||
+        $('meta[property="og:description"]').attr('content') ||
+        '';
+    }
+
+    // 3. HTML selectors (static shell LinkedIn sometimes renders)
+    if (!description) {
+      description =
+        $('.show-more-less-html__markup').text().trim()      ||
+        $('.description__text').text().trim()                ||
+        $('.jobs-description__content').text().trim()        ||
+        $('[class*="description-content"]').text().trim()    ||
+        $('div[class*="description"]').first().text().trim() ||
+        '';
+    }
+
+    // Clean up
+    description = description
+      .replace(/<[^>]+>/g, ' ')        // strip any html tags from JSON-LD
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+      .replace(/\s{3,}/g, '\n\n')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
 
     if (description.length > 50) {
       await LinkedInJob.findByIdAndUpdate(req.params.id, { description });
