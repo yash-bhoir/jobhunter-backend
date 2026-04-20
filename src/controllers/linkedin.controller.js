@@ -422,11 +422,24 @@ exports.fetchFromGmail = async (req, res, next) => {
     });
 
     // Get fresh access token (refresh if expired)
-    const { token } = await oauth2Client.getAccessToken();
-    const accessToken = token || user.gmailAccessToken;
-
-    if (token && token !== user.gmailAccessToken) {
-      await User.findByIdAndUpdate(req.user._id, { gmailAccessToken: token });
+    let accessToken;
+    try {
+      const { token } = await oauth2Client.getAccessToken();
+      accessToken = token || user.gmailAccessToken;
+      if (token && token !== user.gmailAccessToken) {
+        await User.findByIdAndUpdate(req.user._id, { gmailAccessToken: token });
+      }
+    } catch (err) {
+      // Token revoked or expired — clear stored tokens and ask user to reconnect
+      logger.warn(`Gmail token invalid for ${req.user._id}: ${err.message}`);
+      await User.findByIdAndUpdate(req.user._id, {
+        $unset: { gmailAccessToken: '', gmailRefreshToken: '', gmailEmail: '', gmailConnectedAt: '' },
+      });
+      return res.status(401).json({
+        success: false,
+        message: 'Gmail session expired. Please reconnect your Gmail account.',
+        code:    'GMAIL_TOKEN_EXPIRED',
+      });
     }
 
     // Fetch from ALL job portals (LinkedIn, Naukri, Indeed, Foundit, etc.)

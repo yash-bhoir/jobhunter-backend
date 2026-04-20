@@ -8,7 +8,10 @@ const COMBINED_QUERY = [
   'from:jobs-listings@linkedin.com',
   'from:mailer.naukri.com',
   'from:alert@indeed.com',
+  'from:noreply@indeed.com',
   'from:indeedemail.com',
+  'from:alerts@in.indeed.com',
+  'from:jobalert@indeed.com',
   'from:foundit.in',
   'from:alerts@foundit.in',
   'from:internshala.com',
@@ -32,7 +35,7 @@ function detectSource(from, subject) {
   const f = (from || '').toLowerCase();
   if (f.includes('linkedin.com'))    return 'linkedin';
   if (f.includes('naukri.com'))      return 'naukri';
-  if (f.includes('indeed.com') || f.includes('indeedemail')) return 'indeed';
+  if (f.includes('indeed.com') || f.includes('indeedemail') || f.includes('in.indeed')) return 'indeed';
   if (f.includes('foundit.in') || f.includes('monster.com')) return 'foundit';
   if (f.includes('internshala.com')) return 'internshala';
   if (f.includes('timesjobs.com'))   return 'timesjobs';
@@ -153,10 +156,11 @@ function parseIndeed($) {
   const jobs = [];
   const seen = new Set();
 
-  $('a[href*="indeed.com"], a[href*="indeedemail.com"]').each((_, anchor) => {
+  $('a[href*="indeed.com"], a[href*="indeedemail.com"], a[href*="in.indeed.com"]').each((_, anchor) => {
     const url   = $(anchor).attr('href') || '';
     const title = $(anchor).text().replace(/\s+/g, ' ').trim();
-    if (!url.includes('/viewjob') && !url.includes('/rc/clk') && !url.includes('indeed.com/jobs')) return;
+    // Accept any Indeed job link — /viewjob, /rc/clk, /jobs, /pagead/clk
+    if (!url.match(/indeed\.com\/(viewjob|rc\/clk|jobs|pagead|clk)/)) return;
     if (title.length < 3) return;
     if (seen.has(url || title)) return;
     seen.add(url || title);
