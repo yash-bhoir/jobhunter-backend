@@ -5,7 +5,9 @@ const jobSchema = new mongoose.Schema({
   searchId:   { type: mongoose.Types.ObjectId, ref: 'JobSearch' },
   externalId: String,
   title:      { type: String, required: true },
-  company:    { type: String, required: true },
+  // FIX: was required:true — caused silent insertMany failures when search APIs
+  // return jobs with an empty company field. Changed to default:'' for safe insertion.
+  company:    { type: String, default: '' },
   location:   String,
   description: String,
   url:        String,

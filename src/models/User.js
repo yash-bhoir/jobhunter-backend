@@ -1,5 +1,6 @@
-const mongoose = require('mongoose');
-const bcrypt   = require('bcryptjs');
+const mongoose             = require('mongoose');
+const bcrypt               = require('bcryptjs');
+const { encrypt, decrypt } = require('../utils/crypto.util');
 
 const userSchema = new mongoose.Schema({
   email:    { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -69,6 +70,8 @@ const userSchema = new mongoose.Schema({
     reason:            String,
     appliedBy:         mongoose.Types.ObjectId,
     appliedAt:         Date,
+    // FIX: overrides never expired — admin grants now have an optional expiry date.
+    expiresAt:         Date,
   },
 
   emailVerified:        { type: Boolean, default: false },
@@ -92,10 +95,14 @@ const userSchema = new mongoose.Schema({
   deletedAt:    Date,
 
   // ── SMTP — multiple email accounts ──────────────────────────────
+  // SECURITY: `pass` is AES-256-GCM encrypted before storage (see pre-save hook below).
+  // Always read via user.getSmtpAccounts() which returns decrypted passwords.
+  // Never store a plaintext password directly — always go through User.save() or
+  // the SMTP setup controller which encrypts before calling findByIdAndUpdate.
   smtpAccounts: {
     type: [{
       email:        { type: String, required: true },
-      pass:         { type: String, required: true },
+      pass:         { type: String, required: true },  // stored encrypted
       label:        { type: String, default: 'Gmail' },
       isDefault:    { type: Boolean, default: false },
       configuredAt: { type: Date,    default: Date.now },
@@ -104,11 +111,15 @@ const userSchema = new mongoose.Schema({
     default: [],
   },
 
-// Gmail OAuth for email alert parsing
-gmailAccessToken:  { type: String, select: false },
-gmailRefreshToken: { type: String, select: false },
-gmailConnectedAt:  Date,
-gmailEmail:        String,
+  // Gmail OAuth for email alert parsing.
+  // SECURITY: access/refresh tokens are AES-256-GCM encrypted before storage.
+  // Use user.decryptGmailTokens() to obtain the plaintext tokens for API calls.
+  // Tokens are encrypted by the linkedin.controller before findByIdAndUpdate calls.
+  gmailAccessToken:  { type: String, select: false },  // stored encrypted
+  gmailRefreshToken: { type: String, select: false },  // stored encrypted
+  gmailConnectedAt:  Date,
+  gmailEmail:        String,
+  lastGmailFetchAt:  { type: Date, select: false },
 
   // LinkedIn job alert preferences
   linkedinAlerts: {
@@ -129,8 +140,53 @@ userSchema.pre('save', async function (next) {
   next();
 });
 
+// ── Encrypt SMTP passwords before save ───────────────────────────
+// Only encrypts if the smtpAccounts array was modified and ENCRYPTION_KEY is set.
+// Uses isEncrypted() guard so already-encrypted values are never double-encrypted.
+userSchema.pre('save', function (next) {
+  if (!this.isModified('smtpAccounts') || !process.env.ENCRYPTION_KEY) return next();
+  try {
+    const { isEncrypted } = require('../utils/crypto.util');
+    this.smtpAccounts = this.smtpAccounts.map(acc => {
+      if (acc.pass && !isEncrypted(acc.pass)) {
+        return { ...acc.toObject(), pass: encrypt(acc.pass) };
+      }
+      return acc;
+    });
+  } catch (err) {
+    // If encryption fails (missing key etc.) log but don't block save
+    require('../config/logger').warn(`SMTP encryption skipped: ${err.message}`);
+  }
+  next();
+});
+
 userSchema.methods.comparePassword = function (candidate) {
   return bcrypt.compare(candidate, this.password);
+};
+
+/**
+ * Returns decrypted Gmail tokens.
+ * The fields are stored encrypted in DB; call this before passing to googleapis.
+ * Requires the document to have been fetched with +gmailAccessToken +gmailRefreshToken.
+ */
+userSchema.methods.decryptGmailTokens = function () {
+  return {
+    accessToken:  this.gmailAccessToken  ? decrypt(this.gmailAccessToken)  : null,
+    refreshToken: this.gmailRefreshToken ? decrypt(this.gmailRefreshToken) : null,
+  };
+};
+
+/**
+ * Returns the smtpAccounts array with decrypted passwords.
+ * The `pass` field is stored encrypted; use this method instead of accessing
+ * smtpAccounts directly when you need to send email.
+ * Requires the document to have been fetched with +smtpAccounts.
+ */
+userSchema.methods.getSmtpAccounts = function () {
+  return (this.smtpAccounts || []).map(acc => ({
+    ...acc.toObject(),
+    pass: acc.pass ? decrypt(acc.pass) : '',
+  }));
 };
 
 userSchema.methods.isLocked = function () {
