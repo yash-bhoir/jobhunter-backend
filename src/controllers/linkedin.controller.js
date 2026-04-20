@@ -6,6 +6,36 @@ const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
 const logger = require('../config/logger');
 
+// ── Get email-sourced jobs only ───────────────────────────────────
+exports.getEmailJobs = async (req, res, next) => {
+  try {
+    const page   = parseInt(req.query.page)  || 1;
+    const limit  = parseInt(req.query.limit) || 20;
+    const skip   = (page - 1) * limit;
+    const status = req.query.status || null;
+    const source = req.query.source || null; // e.g. 'email_naukri'
+
+    const filter = {
+      userId: req.user._id,
+      source: { $regex: 'email', $options: 'i' },
+    };
+    if (status) filter.status = status;
+    if (source) filter.source = source; // narrow to specific portal
+
+    const [jobs, total] = await Promise.all([
+      LinkedInJob.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      LinkedInJob.countDocuments(filter),
+    ]);
+
+    return paginated(res, jobs, {
+      total, page, limit,
+      pages:   Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    });
+  } catch (err) { next(err); }
+};
+
 // ── Get all LinkedIn jobs ─────────────────────────────────────────
 exports.getJobs = async (req, res, next) => {
   try {
@@ -14,16 +44,8 @@ exports.getJobs = async (req, res, next) => {
     const skip   = (page - 1) * limit;
     const status = req.query.status || null;
 
-    const source = req.query.source || null;
-
     const filter = { userId: req.user._id };
     if (status) filter.status = status;
-    if (source === 'email') {
-      // Matches both 'linkedin_email_alert' (old) and 'email_*' (new) — both contain 'email'
-      filter.source = { $regex: 'email', $options: 'i' };
-    } else if (source) {
-      filter.source = source;
-    }
 
     const [jobs, total] = await Promise.all([
       LinkedInJob.find(filter)

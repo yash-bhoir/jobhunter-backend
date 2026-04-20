@@ -25,6 +25,7 @@ router.get ('/unread-count',       ctrl.getUnreadCount);
 router.get ('/alerts/settings',   ctrl.getAlertSettings);
 router.patch('/alerts/settings',  ctrl.updateAlertSettings);
 router.get ('/connect',           ctrl.getConnectInfo);
+router.get ('/gmail/jobs',      ctrl.getEmailJobs);
 router.get ('/gmail/connect',   ctrl.gmailConnect);
 router.post('/gmail/fetch',     ctrl.fetchFromGmail);
 router.get ('/gmail/status',    ctrl.gmailStatus);
