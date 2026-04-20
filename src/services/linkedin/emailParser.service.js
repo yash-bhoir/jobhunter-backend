@@ -355,6 +355,10 @@ function decodeBody(payload) {
 
 // ── Main: fetch all job alert emails from Gmail ───────────────────
 const fetchJobAlertEmails = async (accessToken, maxResults = 20, daysBack = 30) => {
+  // Validate params
+  maxResults = Math.min(Math.max(parseInt(maxResults) || 20, 1), 200);
+  daysBack   = Math.min(Math.max(parseInt(daysBack)   || 30, 0), 365);
+
   const auth = new google.auth.OAuth2();
   auth.setCredentials({ access_token: accessToken });
   const gmail = google.gmail({ version: 'v1', auth });
@@ -362,10 +366,11 @@ const fetchJobAlertEmails = async (accessToken, maxResults = 20, daysBack = 30) 
   const query = buildQuery(daysBack);
   logger.info(`Gmail query (daysBack=${daysBack}, max=${maxResults}): ${query.slice(0, 120)}...`);
 
+  // Pass maxResults directly to Gmail API — don't over-fetch then slice
   const response = await gmail.users.messages.list({
     userId:     'me',
     q:          query,
-    maxResults,
+    maxResults: maxResults,
   });
 
   const messages = response.data.messages || [];
@@ -375,9 +380,11 @@ const fetchJobAlertEmails = async (accessToken, maxResults = 20, daysBack = 30) 
 
   const allJobs = [];
 
-  for (const msg of messages.slice(0, Math.min(messages.length, maxResults))) {
+  for (const msg of messages) {
     try {
-      const detail  = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
+      const detail  = await gmail.users.messages.get({
+        userId: 'me', id: msg.id, format: 'full',
+      });
       const headers = detail.data.payload?.headers || [];
       const from    = headers.find(h => h.name === 'From')?.value    || '';
       const subject = headers.find(h => h.name === 'Subject')?.value || '';

@@ -109,6 +109,7 @@ gmailAccessToken:  { type: String, select: false },
 gmailRefreshToken: { type: String, select: false },
 gmailConnectedAt:  Date,
 gmailEmail:        String,
+lastGmailFetchAt:  { type: Date, select: false },
 
   // LinkedIn job alert preferences
   linkedinAlerts: {

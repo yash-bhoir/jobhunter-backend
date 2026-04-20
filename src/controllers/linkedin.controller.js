@@ -383,12 +383,13 @@ exports.gmailStatus = async (req, res, next) => {
   try {
     const User = require('../models/User');
     const user = await User.findById(req.user._id)
-      .select('+gmailAccessToken +gmailEmail +gmailConnectedAt');
+      .select('+gmailAccessToken +gmailEmail +gmailConnectedAt +lastGmailFetchAt');
 
     return success(res, {
-      connected:   !!user?.gmailAccessToken,
-      email:       user?.gmailEmail       || null,
-      connectedAt: user?.gmailConnectedAt || null,
+      connected:      !!user?.gmailAccessToken,
+      email:          user?.gmailEmail          || null,
+      connectedAt:    user?.gmailConnectedAt    || null,
+      lastFetchedAt:  user?.lastGmailFetchAt    || null,
     });
   } catch (err) { next(err); }
 };
@@ -398,13 +399,24 @@ exports.fetchFromGmail = async (req, res, next) => {
   try {
     const User = require('../models/User');
     const user = await User.findById(req.user._id)
-      .select('+gmailAccessToken +gmailRefreshToken');
+      .select('+gmailAccessToken +gmailRefreshToken +lastGmailFetchAt');
 
     if (!user?.gmailAccessToken) {
       return res.status(400).json({
         success: false,
         message: 'Gmail not connected. Click "Connect Gmail" first.',
         code:    'GMAIL_NOT_CONNECTED',
+      });
+    }
+
+    // Rate limit: max 1 fetch per 2 minutes per user
+    const lastFetch = user.lastGmailFetchAt;
+    if (lastFetch && Date.now() - new Date(lastFetch).getTime() < 2 * 60 * 1000) {
+      const secsLeft = Math.ceil((2 * 60 * 1000 - (Date.now() - new Date(lastFetch).getTime())) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: `Please wait ${secsLeft}s before fetching again.`,
+        code:    'RATE_LIMITED',
       });
     }
 
@@ -470,18 +482,23 @@ exports.fetchFromGmail = async (req, res, next) => {
     const fullUser = await User.findById(req.user._id).lean();
     const scored   = score(newJobs, fullUser);
 
-    const jobDocs = scored.map(j => ({
-      userId:      req.user._id,
-      title:       j.title,
-      company:     j.company || '',
-      location:    j.location || '',
-      url:         j.url || '',
-      description: j.description || '',
-      remote:      j.remote,
-      source:      `email_${j.source || 'alert'}`,
-      matchScore:  j.matchScore || 0,
-      status:      'new',
-    }));
+    const jobDocs = scored.map(j => {
+      // Avoid double-prefix: if parser already returned 'email_alert', don't make 'email_email_alert'
+      const rawSource = j.source || 'alert';
+      const source = rawSource.startsWith('email_') ? rawSource : `email_${rawSource}`;
+      return {
+        userId:      req.user._id,
+        title:       j.title,
+        company:     j.company || '',
+        location:    j.location || '',
+        url:         j.url || '',
+        description: j.description || '',
+        remote:      j.remote,
+        source,
+        matchScore:  j.matchScore || 0,
+        status:      'new',
+      };
+    });
 
     let insertedCount = 0;
     try {
@@ -555,11 +572,15 @@ exports.fetchFromGmail = async (req, res, next) => {
       `${insertedCount}/${jobDocs.length} jobs inserted, ${emailsFound} HR emails, ${employeesFound} employees`
     );
 
+    // Update last fetch timestamp
+    await User.findByIdAndUpdate(req.user._id, { lastGmailFetchAt: new Date() });
+
     return success(res, {
       fetched:        rawJobs.length,
       saved:          insertedCount,
       emailsFound,
       employeesFound,
+      lastFetchedAt:  new Date().toISOString(),
     }, `Fetched ${insertedCount} jobs from your email alerts!`);
 
   } catch (err) { next(err); }
