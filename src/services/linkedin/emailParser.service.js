@@ -23,6 +23,10 @@ const COMBINED_QUERY = [
   '(subject:"jobs matching" newer_than:7d)',
 ].join(' OR ');
 
+const CITY_RE    = /mumbai|delhi|bangalore|bengaluru|pune|hyderabad|chennai|kolkata|remote|india|noida|gurugram|gurgaon|ahmedabad|jaipur|navi mumbai|thane|bhopal|nagpur|surat|kochi|chandigarh|nationwide/i;
+const JOB_KW_RE  = /engineer|developer|manager|analyst|designer|scientist|consultant|lead|architect|intern|executive|officer|specialist|recruiter|\bhr\b|head of|director|associate|coordinator/i;
+const NOISE_RE   = /^\d+$|^(view|apply|see|click|here|job|jobs|more|less|new|easy apply|promoted|actively recruiting|linkedin|naukri|indeed|foundit|internshala|shine|hirist|instahyre|timesjobs)$/i;
+
 // ── Source detection ──────────────────────────────────────────────
 function detectSource(from, subject) {
   const f = (from || '').toLowerCase();
@@ -38,59 +42,134 @@ function detectSource(from, subject) {
   return 'email_alert';
 }
 
+// ── Extract clean text nodes from a cheerio element ──────────────
+// Returns array of non-empty text strings from all child nodes
+function extractTexts($, el) {
+  const texts = [];
+  $(el).find('*').addBack().contents().each((_, node) => {
+    if (node.type === 'text') {
+      const t = (node.data || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+      if (t.length > 1 && !NOISE_RE.test(t)) texts.push(t);
+    }
+  });
+  // Deduplicate adjacent identical values
+  return texts.filter((t, i) => t !== texts[i - 1]);
+}
+
+// ── Walk up DOM to find job container ────────────────────────────
+// For a given anchor, find the enclosing block (td/div/li/article)
+function findContainer($, anchor) {
+  let el = $(anchor).parent();
+  for (let i = 0; i < 6; i++) {
+    const tag = el.get(0)?.tagName?.toLowerCase();
+    if (!tag || tag === 'body' || tag === 'html') break;
+    if (['td', 'div', 'li', 'article', 'section'].includes(tag)) return el;
+    el = el.parent();
+  }
+  return $(anchor).parent();
+}
+
 // ── LinkedIn ──────────────────────────────────────────────────────
 function parseLinkedIn($) {
   const jobs = [];
+  const seen = new Set();
 
-  $('table[data-job-id], .job-card, [class*="job"]').each((_, el) => {
-    const title   = $(el).find('a[href*="linkedin.com/jobs"]').first().text().trim() ||
-                    $(el).find('strong, b, h3, h4').first().text().trim();
-    const company = $(el).find('[class*="company"], [class*="subtitle"]').first().text().trim();
-    const loc     = $(el).find('[class*="location"], [class*="geo"]').first().text().trim();
-    const url     = $(el).find('a[href*="linkedin.com/jobs"]').first().attr('href') || '';
-    if (title?.length > 3)
-      jobs.push({ title, company, location: loc, url, source: 'linkedin', remote: /remote/i.test(loc) });
+  // LinkedIn sends both /jobs/view and /comm/jobs/view URLs
+  $('a[href*="linkedin.com/jobs"], a[href*="linkedin.com/comm/jobs"]').each((_, anchor) => {
+    const url   = $(anchor).attr('href') || '';
+    const title = $(anchor).text().replace(/\s+/g, ' ').trim();
+
+    if (title.length < 3 || !JOB_KW_RE.test(title)) return;
+
+    const key = url || title;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    // Find the immediate parent td or div that wraps this job's info
+    const container = findContainer($, anchor);
+
+    // Extract all non-noise text from the container
+    const texts = extractTexts($, container).filter(t => t !== title);
+
+    // Company = first non-city, non-noise text
+    const company = texts.find(t =>
+      !CITY_RE.test(t) &&
+      !t.match(/^\d+/) &&
+      t.length > 1 && t.length < 80
+    ) || '';
+
+    // Location = first text matching city pattern
+    const location = texts.find(t => CITY_RE.test(t)) || '';
+
+    jobs.push({
+      title,
+      company,
+      location: location.replace(/\s*·\s*.+$/, '').trim(), // strip "· 2 days ago"
+      url,
+      source:   'linkedin',
+      remote:   /remote/i.test(location),
+    });
   });
 
-  if (jobs.length === 0) {
-    $('a[href*="linkedin.com/jobs/view"]').each((_, el) => {
-      const title = $(el).text().trim();
-      const url   = $(el).attr('href') || '';
-      if (title?.length > 3)
-        jobs.push({ title, company: '', location: '', url, source: 'linkedin', remote: false });
-    });
-  }
   return jobs;
 }
 
 // ── Naukri ────────────────────────────────────────────────────────
 function parseNaukri($) {
   const jobs = [];
-  $('a[href*="naukri.com"]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
-    if (text.length < 3) return;
-    const parent  = $(el).closest('td, div, tr');
-    const company = parent.find('b, strong').not($(el)).first().text().trim();
-    const loc     = parent.find('[class*="loc"], [class*="location"]').first().text().trim();
-    jobs.push({ title: text, company, location: loc, url: href, source: 'naukri', remote: /remote|work from home/i.test(loc) });
+  const seen = new Set();
+
+  $('a[href*="naukri.com"]').each((_, anchor) => {
+    const url   = $(anchor).attr('href') || '';
+    const title = $(anchor).text().replace(/\s+/g, ' ').trim();
+    if (title.length < 3 || !JOB_KW_RE.test(title)) return;
+    if (seen.has(url || title)) return;
+    seen.add(url || title);
+
+    const container = findContainer($, anchor);
+    const texts     = extractTexts($, container).filter(t => t !== title);
+
+    const company  = texts.find(t => !CITY_RE.test(t) && t.length > 1 && t.length < 80) || '';
+    const location = texts.find(t => CITY_RE.test(t)) || '';
+
+    jobs.push({
+      title, company,
+      location: location.replace(/\s*[\|·]\s*.+$/, '').trim(),
+      url, source: 'naukri',
+      remote: /remote|work from home|wfh/i.test(location),
+    });
   });
+
   return jobs;
 }
 
 // ── Indeed ────────────────────────────────────────────────────────
 function parseIndeed($) {
   const jobs = [];
-  $('a[href*="indeed.com"]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
-    if (!href.includes('/viewjob') && !href.includes('/rc/clk')) return;
-    if (text.length < 3) return;
-    const parent  = $(el).closest('td, div, table');
-    const company = parent.find('[class*="company"], [class*="employer"]').first().text().trim();
-    const loc     = parent.find('[class*="location"], [class*="loc"]').first().text().trim();
-    jobs.push({ title: text, company, location: loc, url: href, source: 'indeed', remote: /remote/i.test(loc) });
+  const seen = new Set();
+
+  $('a[href*="indeed.com"], a[href*="indeedemail.com"]').each((_, anchor) => {
+    const url   = $(anchor).attr('href') || '';
+    const title = $(anchor).text().replace(/\s+/g, ' ').trim();
+    if (!url.includes('/viewjob') && !url.includes('/rc/clk') && !url.includes('indeed.com/jobs')) return;
+    if (title.length < 3) return;
+    if (seen.has(url || title)) return;
+    seen.add(url || title);
+
+    const container = findContainer($, anchor);
+    const texts     = extractTexts($, container).filter(t => t !== title);
+
+    const company  = texts.find(t => !CITY_RE.test(t) && t.length > 1 && t.length < 80) || '';
+    const location = texts.find(t => CITY_RE.test(t)) || '';
+
+    jobs.push({
+      title, company,
+      location: location.replace(/\s*[\|·]\s*.+$/, '').trim(),
+      url, source: 'indeed',
+      remote: /remote/i.test(location),
+    });
   });
+
   return jobs;
 }
 
@@ -98,52 +177,88 @@ function parseIndeed($) {
 function parseFoundit($, html) {
   const domain = html.includes('foundit.in') ? 'foundit.in' : 'monster.com';
   const jobs   = [];
-  $(`a[href*="${domain}"]`).each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
-    if (text.length < 3) return;
-    const parent  = $(el).closest('td, div, tr');
-    const company = parent.find('b, strong').not($(el)).first().text().trim();
-    const loc     = parent.find('[class*="loc"], [class*="location"]').first().text().trim();
-    jobs.push({ title: text, company, location: loc, url: href, source: 'foundit', remote: /remote|work from home/i.test(loc) });
+  const seen   = new Set();
+
+  $(`a[href*="${domain}"]`).each((_, anchor) => {
+    const url   = $(anchor).attr('href') || '';
+    const title = $(anchor).text().replace(/\s+/g, ' ').trim();
+    if (title.length < 3 || !JOB_KW_RE.test(title)) return;
+    if (seen.has(url || title)) return;
+    seen.add(url || title);
+
+    const container = findContainer($, anchor);
+    const texts     = extractTexts($, container).filter(t => t !== title);
+
+    const company  = texts.find(t => !CITY_RE.test(t) && t.length > 1 && t.length < 80) || '';
+    const location = texts.find(t => CITY_RE.test(t)) || '';
+
+    jobs.push({
+      title, company,
+      location: location.replace(/\s*[\|·]\s*.+$/, '').trim(),
+      url, source: 'foundit',
+      remote: /remote|work from home/i.test(location),
+    });
   });
+
   return jobs;
 }
 
 // ── Internshala ───────────────────────────────────────────────────
 function parseInternshala($) {
   const jobs = [];
-  $('a[href*="internshala.com"]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
-    if (!href.includes('/jobs') && !href.includes('/internship')) return;
-    if (text.length < 3) return;
-    const parent  = $(el).closest('td, div, tr');
-    const company = parent.find('[class*="company"]').first().text().trim();
-    const loc     = parent.find('[class*="location"]').first().text().trim();
-    jobs.push({ title: text, company, location: loc || 'India', url: href, source: 'internshala', remote: /remote|work.from.home/i.test(loc + href) });
+  const seen = new Set();
+
+  $('a[href*="internshala.com"]').each((_, anchor) => {
+    const url   = $(anchor).attr('href') || '';
+    const title = $(anchor).text().replace(/\s+/g, ' ').trim();
+    if (!url.includes('/jobs') && !url.includes('/internship')) return;
+    if (title.length < 3) return;
+    if (seen.has(url || title)) return;
+    seen.add(url || title);
+
+    const container = findContainer($, anchor);
+    const texts     = extractTexts($, container).filter(t => t !== title);
+
+    const company  = texts.find(t => !CITY_RE.test(t) && t.length > 1 && t.length < 80) || '';
+    const location = texts.find(t => CITY_RE.test(t)) || 'India';
+
+    jobs.push({
+      title, company,
+      location: location.replace(/\s*[\|·]\s*.+$/, '').trim(),
+      url, source: 'internshala',
+      remote: /remote|work.from.home/i.test(location + url),
+    });
   });
+
   return jobs;
 }
 
 // ── Generic fallback (TimesJobs, Shine, Hirist, etc.) ────────────
-const JOB_KEYWORDS = /engineer|developer|manager|analyst|designer|scientist|consultant|lead|architect|intern|executive|officer|specialist|recruiter|\bhr\b|head of/i;
-const CITY_PATTERN = /mumbai|delhi|bangalore|bengaluru|pune|hyderabad|chennai|kolkata|remote|india|noida|gurugram|gurgaon|ahmedabad|jaipur/i;
-
 function parseGeneric($, sourceName) {
   const jobs = [];
-  $('a').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
-    if (!JOB_KEYWORDS.test(text) || text.length < 5 || text.length > 120) return;
+  const seen = new Set();
 
-    const parent   = $(el).closest('td, div, tr, li');
-    const siblings = parent.find('*').not($(el)).map((_, e) => $(e).text().trim()).get().filter(Boolean);
-    const company  = siblings.find(s => s.length > 2 && s.length < 60 && !JOB_KEYWORDS.test(s)) || '';
-    const loc      = siblings.find(s => CITY_PATTERN.test(s)) || '';
+  $('a').each((_, anchor) => {
+    const url   = $(anchor).attr('href') || '';
+    const title = $(anchor).text().replace(/\s+/g, ' ').trim();
+    if (!JOB_KW_RE.test(title) || title.length < 5 || title.length > 120) return;
+    if (seen.has(url || title)) return;
+    seen.add(url || title);
 
-    jobs.push({ title: text, company, location: loc, url: href, source: sourceName, remote: /remote|work from home/i.test(loc) });
+    const container = findContainer($, anchor);
+    const texts     = extractTexts($, container).filter(t => t !== title);
+
+    const company  = texts.find(t => !CITY_RE.test(t) && t.length > 1 && t.length < 80) || '';
+    const location = texts.find(t => CITY_RE.test(t)) || '';
+
+    jobs.push({
+      title, company,
+      location: location.replace(/\s*[\|·]\s*.+$/, '').trim(),
+      url, source: sourceName,
+      remote: /remote|work from home/i.test(location),
+    });
   });
+
   return jobs;
 }
 
@@ -209,7 +324,7 @@ const fetchJobAlertEmails = async (accessToken, maxResults = 20) => {
 
   const allJobs = [];
 
-  for (const msg of messages.slice(0, 15)) {
+  for (const msg of messages.slice(0, Math.min(messages.length, maxResults))) {
     try {
       const detail  = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
       const headers = detail.data.payload?.headers || [];
@@ -220,19 +335,28 @@ const fetchJobAlertEmails = async (accessToken, maxResults = 20) => {
       if (html) {
         const jobs = parseEmailToJobs(html, from, subject);
         allJobs.push(...jobs);
-        logger.info(`Parsed ${jobs.length} jobs from ${from}`);
+        logger.info(`Parsed ${jobs.length} jobs from: ${from} | Subject: ${subject}`);
+      } else {
+        logger.warn(`No HTML body in email from: ${from}`);
       }
     } catch (err) {
       logger.warn(`Email parse failed ${msg.id}: ${err.message}`);
     }
   }
 
-  // Deduplicate by URL
-  const seen = new Set();
+  // Deduplicate by URL, then by title+company
+  const seenUrls   = new Set();
+  const seenTitles = new Set();
+
   return allJobs.filter(j => {
-    if (!j.url) return true;
-    if (seen.has(j.url)) return false;
-    seen.add(j.url); return true;
+    if (j.url) {
+      if (seenUrls.has(j.url)) return false;
+      seenUrls.add(j.url);
+    }
+    const titleKey = `${j.title}__${j.company}`.toLowerCase();
+    if (seenTitles.has(titleKey)) return false;
+    seenTitles.add(titleKey);
+    return true;
   });
 };
 
