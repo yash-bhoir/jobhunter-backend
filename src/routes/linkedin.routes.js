@@ -4,6 +4,9 @@ const ctrl    = require('../controllers/linkedin.controller');
 const { authenticate }   = require('../middleware/auth.middleware');
 const { requireCredits, planGuard } = require('../middleware/credits.middleware');
 
+// Public route — Google redirects here with no JWT (userId comes from state param)
+router.get ('/gmail/callback',  ctrl.gmailCallback);
+
 router.use(authenticate);
 
 router.get ('/jobs',                      ctrl.getJobs);
@@ -23,7 +26,6 @@ router.get ('/alerts/settings',   ctrl.getAlertSettings);
 router.patch('/alerts/settings',  ctrl.updateAlertSettings);
 router.get ('/connect',           ctrl.getConnectInfo);
 router.get ('/gmail/connect',   ctrl.gmailConnect);
-router.get ('/gmail/callback',  ctrl.gmailCallback);
 router.post('/gmail/fetch',     ctrl.fetchFromGmail);
 router.get ('/gmail/status',    ctrl.gmailStatus);
 router.delete('/gmail/disconnect', ctrl.gmailDisconnect);
