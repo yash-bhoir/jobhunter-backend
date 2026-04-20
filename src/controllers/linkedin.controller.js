@@ -415,7 +415,8 @@ exports.fetchFromGmail = async (req, res, next) => {
     }
 
     // Fetch from ALL job portals (LinkedIn, Naukri, Indeed, Foundit, etc.)
-    const rawJobs = await fetchJobAlertEmails(accessToken, 20);
+    const maxResults = parseInt(req.body.maxResults) || 20;
+    const rawJobs = await fetchJobAlertEmails(accessToken, maxResults);
 
     if (rawJobs.length === 0) {
       return success(res, {
@@ -443,7 +444,7 @@ exports.fetchFromGmail = async (req, res, next) => {
     const jobDocs = scored.map(j => ({
       userId:     req.user._id,
       title:      j.title,
-      company:    j.company,
+      company:    j.company || '',
       location:   j.location,
       url:        j.url,
       remote:     j.remote,
@@ -452,7 +453,15 @@ exports.fetchFromGmail = async (req, res, next) => {
       status:     'new',
     }));
 
-    await LinkedInJob.insertMany(jobDocs, { ordered: false }).catch(() => {});
+    let insertedCount = 0;
+    try {
+      const result = await LinkedInJob.insertMany(jobDocs, { ordered: false });
+      insertedCount = result.length;
+    } catch (err) {
+      // Partial success — some docs inserted, some failed (e.g. duplicates)
+      insertedCount = err.insertedDocs?.length || 0;
+      logger.warn(`Gmail insertMany partial: ${insertedCount}/${jobDocs.length} inserted — ${err.message}`);
+    }
 
     // Auto-find HR emails + employees
     const isPro     = req.user.plan === 'pro' || req.user.plan === 'team';
@@ -513,15 +522,15 @@ exports.fetchFromGmail = async (req, res, next) => {
 
     logger.info(
       `Gmail alert fetch: ${req.user.email} — ` +
-      `${jobDocs.length} jobs, ${emailsFound} HR emails, ${employeesFound} employees`
+      `${insertedCount}/${jobDocs.length} jobs inserted, ${emailsFound} HR emails, ${employeesFound} employees`
     );
 
     return success(res, {
       fetched:        rawJobs.length,
-      saved:          jobDocs.length,
+      saved:          insertedCount,
       emailsFound,
       employeesFound,
-    }, `Fetched ${jobDocs.length} jobs from your LinkedIn email alerts!`);
+    }, `Fetched ${insertedCount} jobs from your email alerts!`);
 
   } catch (err) { next(err); }
 };
