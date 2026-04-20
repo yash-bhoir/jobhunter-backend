@@ -2,29 +2,68 @@ const { google }  = require('googleapis');
 const cheerio     = require('cheerio');
 const logger      = require('../../config/logger');
 
-// ── Combined Gmail search query (all major Indian job portals) ────
-const COMBINED_QUERY = [
-  'from:jobalerts-noreply@linkedin.com',
-  'from:jobs-listings@linkedin.com',
-  'from:mailer.naukri.com',
-  'from:alert@indeed.com',
-  'from:noreply@indeed.com',
-  'from:indeedemail.com',
-  'from:alerts@in.indeed.com',
-  'from:jobalert@indeed.com',
-  'from:foundit.in',
-  'from:alerts@foundit.in',
-  'from:internshala.com',
-  'from:timesjobs.com',
-  'from:shine.com',
-  'from:instahyre.com',
-  'from:hirist.tech',
-  '(subject:"job alert" newer_than:7d)',
-  '(subject:"jobs for you" newer_than:7d)',
-  '(subject:"new jobs" newer_than:7d)',
-  '(subject:"job recommendations" newer_than:7d)',
-  '(subject:"jobs matching" newer_than:7d)',
-].join(' OR ');
+// ── Build Gmail search query ──────────────────────────────────────
+// Casts a wide net: known senders + broad subject keywords
+// daysBack=0 means no time limit
+const buildQuery = (daysBack = 30) => {
+  const time = daysBack > 0 ? ` newer_than:${daysBack}d` : '';
+
+  const knownSenders = [
+    'from:jobalerts-noreply@linkedin.com',
+    'from:jobs-listings@linkedin.com',
+    'from:mailer.naukri.com',
+    'from:alert@indeed.com',
+    'from:noreply@indeed.com',
+    'from:indeedemail.com',
+    'from:alerts@in.indeed.com',
+    'from:jobalert@indeed.com',
+    'from:foundit.in',
+    'from:alerts@foundit.in',
+    'from:internshala.com',
+    'from:timesjobs.com',
+    'from:shine.com',
+    'from:instahyre.com',
+    'from:hirist.tech',
+    'from:noreply@instahyre.com',
+    'from:alerts@cutshort.io',
+    'from:noreply@wellfound.com',
+    'from:noreply@angellist.com',
+    'from:jobs@glassdoor.com',
+    'from:noreply@glassdoor.com',
+    'from:alerts@iimjobs.com',
+    'from:noreply@freshersworld.com',
+    'from:jobs@monsterindia.com',
+  ].join(' OR ');
+
+  // Broad subject keywords — catches any job portal alert
+  const subjects = [
+    'subject:"job alert"',
+    'subject:"jobs for you"',
+    'subject:"new jobs"',
+    'subject:"job recommendations"',
+    'subject:"jobs matching"',
+    'subject:"recommended jobs"',
+    'subject:"jobs you might like"',
+    'subject:"new job"',
+    'subject:"job opening"',
+    'subject:"job openings"',
+    'subject:"hiring"',
+    'subject:"we found jobs"',
+    'subject:"jobs near you"',
+    'subject:"apply now"',
+    'subject:"career opportunity"',
+    'subject:"career opportunities"',
+    'subject:"job opportunity"',
+    'subject:"job opportunities"',
+    'subject:"vacancy"',
+    'subject:"vacancies"',
+    'subject:"positions matching"',
+    'subject:"roles matching"',
+    'subject:"fresh jobs"',
+  ].map(s => `(${s}${time})`).join(' OR ');
+
+  return `(${knownSenders}) OR (${subjects})`;
+};
 
 const CITY_RE    = /mumbai|delhi|bangalore|bengaluru|pune|hyderabad|chennai|kolkata|remote|india|noida|gurugram|gurgaon|ahmedabad|jaipur|navi mumbai|thane|bhopal|nagpur|surat|kochi|chandigarh|nationwide/i;
 const JOB_KW_RE  = /engineer|developer|manager|analyst|designer|scientist|consultant|lead|architect|intern|executive|officer|specialist|recruiter|\bhr\b|head of|director|associate|coordinator/i;
@@ -315,14 +354,17 @@ function decodeBody(payload) {
 }
 
 // ── Main: fetch all job alert emails from Gmail ───────────────────
-const fetchJobAlertEmails = async (accessToken, maxResults = 20) => {
+const fetchJobAlertEmails = async (accessToken, maxResults = 20, daysBack = 30) => {
   const auth = new google.auth.OAuth2();
   auth.setCredentials({ access_token: accessToken });
   const gmail = google.gmail({ version: 'v1', auth });
 
+  const query = buildQuery(daysBack);
+  logger.info(`Gmail query (daysBack=${daysBack}, max=${maxResults}): ${query.slice(0, 120)}...`);
+
   const response = await gmail.users.messages.list({
     userId:     'me',
-    q:          COMBINED_QUERY,
+    q:          query,
     maxResults,
   });
 

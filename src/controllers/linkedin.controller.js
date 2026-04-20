@@ -444,7 +444,8 @@ exports.fetchFromGmail = async (req, res, next) => {
 
     // Fetch from ALL job portals (LinkedIn, Naukri, Indeed, Foundit, etc.)
     const maxResults = parseInt(req.body.maxResults) || 20;
-    const rawJobs = await fetchJobAlertEmails(accessToken, maxResults);
+    const daysBack   = parseInt(req.body.daysBack)   || 30;
+    const rawJobs = await fetchJobAlertEmails(accessToken, maxResults, daysBack);
 
     if (rawJobs.length === 0) {
       return success(res, {
