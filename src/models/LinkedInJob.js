@@ -29,9 +29,11 @@ const SOURCE_ENUM = [
 const linkedInJobSchema = new mongoose.Schema({
   userId:      { type: mongoose.Types.ObjectId, ref: 'User', required: true },
   title:       { type: String, required: true },
+
   // FIX: was required:true — email parser often returns empty company,
   // which caused all insertMany docs to fail silently.
   company:     { type: String, default: '' },
+
   location:    String,
   description: String,
   url:         String,
@@ -65,6 +67,9 @@ const linkedInJobSchema = new mongoose.Schema({
   recruiterEmail:    String,
   recruiterName:     String,
   recruiterLinkedIn: String,
+  careerPageUrl:     String,
+  linkedinUrl:       String,
+  employeeSearch:    String,
 
   // FIX: was missing — Job.js has allRecruiterContacts[], LinkedInJob did not.
   // findHR() now stores all Apollo contacts here instead of discarding contacts 2-N.
