@@ -117,6 +117,7 @@ const userSchema = new mongoose.Schema({
   // Tokens are encrypted by the linkedin.controller before findByIdAndUpdate calls.
   gmailAccessToken:  { type: String, select: false },  // stored encrypted
   gmailRefreshToken: { type: String, select: false },  // stored encrypted
+  gmailTokenExpiry:  { type: Number, select: false },  // tokens.expiry_date (ms epoch) — needed for auto-refresh
   gmailConnectedAt:  Date,
   gmailEmail:        String,
   lastGmailFetchAt:  { type: Date, select: false },

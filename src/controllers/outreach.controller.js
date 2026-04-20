@@ -1,8 +1,9 @@
 const OutreachEmail = require('../models/OutreachEmail');
 const Job           = require('../models/Job');
+const LinkedInJob   = require('../models/LinkedInJob');
 const User          = require('../models/User');
 const UserCredits   = require('../models/UserCredits');
-const { generateOutreachEmail }  = require('../services/ai/emailWriter.service');
+const { generateOutreachEmail, enhanceOutreachEmail } = require('../services/ai/emailWriter.service');
 const { sendOutreachEmail }      = require('../services/outreach/smtp.service');
 const { optimizeResumeForJob, downloadPdfBuffer } = require('../services/ai/resumeOptimizer.service');
 const { enqueueEmail }           = require('../config/queue');
@@ -45,7 +46,7 @@ exports.getEmails = async (req, res, next) => {
 // ── Generate AI email ─────────────────────────────────────────────
 exports.generateEmail = async (req, res, next) => {
   try {
-    const { company, jobTitle, jobUrl, recruiterName, jobId } = req.body;
+    const { company, jobTitle, jobUrl, recruiterName, jobId, jobDescription } = req.body;
 
     if (!company || !jobTitle) {
       throw new ValidationError('Company and job title are required');
@@ -53,8 +54,18 @@ exports.generateEmail = async (req, res, next) => {
 
     const user = await User.findById(req.user._id);
 
+    // Enrich jobDescription from the stored Job/LinkedInJob if not provided in body
+    let resolvedJd = jobDescription || '';
+    if (!resolvedJd && jobId) {
+      try {
+        const storedJob = await Job.findOne({ _id: jobId, userId: req.user._id }).select('description').lean()
+          || await LinkedInJob.findOne({ _id: jobId, userId: req.user._id }).select('description').lean();
+        resolvedJd = storedJob?.description || '';
+      } catch { /* silent — JD enrichment is best-effort */ }
+    }
+
     const candidate = {
-      name:        user.fullName || `${user.profile?.firstName} ${user.profile?.lastName}`,
+      name:        user.fullName || `${user.profile?.firstName} ${user.profile?.lastName}`.trim(),
       currentRole: user.profile?.currentRole  || 'Professional',
       experience:  user.profile?.experience   || 0,
       skills:      user.profile?.skills       || [],
@@ -68,6 +79,7 @@ exports.generateEmail = async (req, res, next) => {
       company,
       jobTitle,
       jobUrl,
+      jobDescription: resolvedJd,
       candidate,
     });
 
@@ -93,6 +105,32 @@ exports.generateEmail = async (req, res, next) => {
       body:    result.body,
       tokensUsed: result.tokensUsed,
     }, 'Email generated');
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Enhance existing email ────────────────────────────────────────
+exports.enhanceEmail = async (req, res, next) => {
+  try {
+    const { subject, body, company, jobTitle, jobDescription } = req.body;
+    if (!subject || !body) throw new ValidationError('subject and body are required');
+
+    const user = await User.findById(req.user._id);
+    const candidate = {
+      name:        user.fullName || `${user.profile?.firstName} ${user.profile?.lastName}`.trim(),
+      currentRole: user.profile?.currentRole || 'Professional',
+      experience:  user.profile?.experience  || 0,
+      skills:      user.profile?.skills      || [],
+      phone:       user.profile?.phone       || '',
+      linkedinUrl: user.profile?.linkedinUrl || '',
+    };
+
+    const result = await enhanceOutreachEmail({
+      subject, body, jobTitle, company, jobDescription, candidate,
+    });
+
+    return success(res, result, 'Email enhanced');
   } catch (err) {
     next(err);
   }
@@ -202,9 +240,19 @@ exports.sendEmail = async (req, res, next) => {
       await sendOutreachEmail({ userId: req.user._id, smtpUser, smtpPass, to, subject, body,
         fromName: user.fullName || user.profile?.firstName, attachments, useAdminFallback: true });
       await OutreachEmail.findByIdAndUpdate(record._id, { status: 'sent', sentAt: new Date() });
-      if (jobId) await Job.findOneAndUpdate(
-        { _id: jobId, userId: req.user._id }, { $set: { status: 'applied', appliedAt: new Date() } }
-      );
+      if (jobId) {
+        // Try Job model first; if no match, try LinkedInJob (email-parsed + LinkedIn alert jobs)
+        const updatedJob = await Job.findOneAndUpdate(
+          { _id: jobId, userId: req.user._id },
+          { $set: { status: 'applied', appliedAt: new Date() } }
+        );
+        if (!updatedJob) {
+          await LinkedInJob.findOneAndUpdate(
+            { _id: jobId, userId: req.user._id },
+            { $set: { status: 'applied', appliedAt: new Date(), statusUpdatedAt: new Date() } }
+          );
+        }
+      }
     }
 
     logger.info(`Outreach email ${jobQueueId ? 'queued' : 'sent'} by ${req.user.email} to ${to}`);

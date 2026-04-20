@@ -70,6 +70,7 @@ const startEmailWorker = async () => {
     const { sendOutreachEmail } = require('../services/outreach/smtp.service');
     const OutreachEmail = require('../models/OutreachEmail');
     const Job           = require('../models/Job');
+    const LinkedInJob   = require('../models/LinkedInJob');
 
     const connection = {
       host: new URL(redisUrl).hostname,
@@ -101,9 +102,12 @@ const startEmailWorker = async () => {
           });
         }
 
-        // Mark job applied
+        // Mark job applied — try Job model first, then LinkedInJob (email/LinkedIn alert jobs)
         if (jobId) {
-          await Job.findByIdAndUpdate(jobId, { status: 'applied', appliedAt: new Date() });
+          const updated = await Job.findByIdAndUpdate(jobId, { status: 'applied', appliedAt: new Date() });
+          if (!updated) {
+            await LinkedInJob.findByIdAndUpdate(jobId, { status: 'applied', appliedAt: new Date(), statusUpdatedAt: new Date() });
+          }
         }
 
         logger.info(`[Queue] Email sent to ${to} (job ${job.id})`);

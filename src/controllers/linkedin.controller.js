@@ -40,13 +40,18 @@ exports.getEmailJobs = async (req, res, next) => {
 // ── Get all LinkedIn jobs ─────────────────────────────────────────
 exports.getJobs = async (req, res, next) => {
   try {
-    const page   = parseInt(req.query.page)   || 1;
-    const limit  = parseInt(req.query.limit)  || 20;
-    const skip   = (page - 1) * limit;
-    const status = req.query.status || null;
+    const page       = parseInt(req.query.page)   || 1;
+    const limit      = parseInt(req.query.limit)  || 20;
+    const skip       = (page - 1) * limit;
+    const status     = req.query.status     || null;
+    const sourceType = req.query.sourceType || null; // 'linkedin' → exclude email-sourced jobs
 
     const filter = { userId: req.user._id };
     if (status) filter.status = status;
+    // When sourceType=linkedin, exclude email-parsed jobs (source starts with 'email_')
+    if (sourceType === 'linkedin') {
+      filter.source = { $in: ['linkedin_alert', 'linkedin_fetch'] };
+    }
 
     const [jobs, total] = await Promise.all([
       LinkedInJob.find(filter)
@@ -393,13 +398,18 @@ exports.gmailCallback = async (req, res, next) => {
 
     // Save tokens — encrypt before storing (AES-256-GCM via crypto.util).
     // Use decrypt() in fetchFromGmail before passing to googleapis.
+    // expiry_date (ms epoch) is stored plaintext so we can pass it back to the
+    // OAuth2 client — without it, getAccessToken() never knows the token is expired
+    // and silently returns the stale token instead of refreshing.
     const User = require('../models/User');
-    await User.findByIdAndUpdate(userId, {
-      gmailAccessToken:  encrypt(tokens.access_token),
-      gmailRefreshToken: tokens.refresh_token ? encrypt(tokens.refresh_token) : undefined,
-      gmailConnectedAt:  new Date(),
-      gmailEmail:        profile.email,
-    });
+    const tokenUpdate = {
+      gmailAccessToken: encrypt(tokens.access_token),
+      gmailConnectedAt: new Date(),
+      gmailEmail:       profile.email,
+    };
+    if (tokens.refresh_token) tokenUpdate.gmailRefreshToken = encrypt(tokens.refresh_token);
+    if (tokens.expiry_date)   tokenUpdate.gmailTokenExpiry  = tokens.expiry_date;
+    await User.findByIdAndUpdate(userId, tokenUpdate);
 
     logger.info(`Gmail connected for user ${userId}: ${profile.email}`);
     res.redirect(`${process.env.CLIENT_URL}/email-jobs?gmail=connected`);
@@ -432,7 +442,7 @@ exports.fetchFromGmail = async (req, res, next) => {
   try {
     const User = require('../models/User');
     const user = await User.findById(req.user._id)
-      .select('+gmailAccessToken +gmailRefreshToken +lastGmailFetchAt');
+      .select('+gmailAccessToken +gmailRefreshToken +gmailTokenExpiry +lastGmailFetchAt');
 
     if (!user?.gmailAccessToken) {
       return res.status(400).json({
@@ -461,7 +471,11 @@ exports.fetchFromGmail = async (req, res, next) => {
     // plaintext (returns as-is), so this works during a rolling migration.
     const { accessToken: rawAccessToken, refreshToken: rawRefreshToken } = user.decryptGmailTokens();
 
-    // Setup OAuth client with stored tokens
+    // Setup OAuth client with stored tokens.
+    // IMPORTANT: pass expiry_date so the library knows when to auto-refresh.
+    // Without it, getAccessToken() assumes the token is still valid and returns
+    // the stale (expired) access_token instead of using the refresh_token.
+    // Default to 1 (1 ms past epoch) so an unknown expiry always triggers a refresh.
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
@@ -469,22 +483,29 @@ exports.fetchFromGmail = async (req, res, next) => {
     oauth2Client.setCredentials({
       access_token:  rawAccessToken,
       refresh_token: rawRefreshToken,
+      expiry_date:   user.gmailTokenExpiry || 1,
     });
 
-    // Get fresh access token (refresh if expired)
+    // Get fresh access token (auto-refreshes if expiry_date is in the past)
     let accessToken;
     try {
-      const { token } = await oauth2Client.getAccessToken();
+      const { token, res: tokenRes } = await oauth2Client.getAccessToken();
       accessToken = token || rawAccessToken;
+
+      // Persist new access_token + expiry_date if they changed
       if (token && token !== rawAccessToken) {
-        // Store new access token encrypted
-        await User.findByIdAndUpdate(req.user._id, { gmailAccessToken: encrypt(token) });
+        const newExpiry = tokenRes?.data?.expiry_date || (Date.now() + 3600 * 1000);
+        await User.findByIdAndUpdate(req.user._id, {
+          gmailAccessToken: encrypt(token),
+          gmailTokenExpiry: newExpiry,
+        });
+        logger.info(`Gmail access token refreshed for ${req.user._id}`);
       }
     } catch (err) {
-      // Token revoked or expired — clear stored tokens and ask user to reconnect
+      // Token revoked or refresh_token missing — clear stored tokens and ask user to reconnect
       logger.warn(`Gmail token invalid for ${req.user._id}: ${err.message}`);
       await User.findByIdAndUpdate(req.user._id, {
-        $unset: { gmailAccessToken: '', gmailRefreshToken: '', gmailEmail: '', gmailConnectedAt: '' },
+        $unset: { gmailAccessToken: '', gmailRefreshToken: '', gmailEmail: '', gmailConnectedAt: '', gmailTokenExpiry: '' },
       });
       return res.status(401).json({
         success: false,
@@ -899,6 +920,7 @@ exports.gmailDisconnect = async (req, res, next) => {
       $unset: {
         gmailAccessToken:  '',
         gmailRefreshToken: '',
+        gmailTokenExpiry:  '',
         gmailConnectedAt:  '',
         gmailEmail:        '',
       },

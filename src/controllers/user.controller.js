@@ -1,8 +1,10 @@
-const User        = require('../models/User');
-const UserCredits = require('../models/UserCredits');
-const ActivityLog = require('../models/ActivityLog');
-const JobSearch   = require('../models/JobSearch');
-const Job         = require('../models/Job');
+const User           = require('../models/User');
+const UserCredits    = require('../models/UserCredits');
+const ActivityLog    = require('../models/ActivityLog');
+const JobSearch      = require('../models/JobSearch');
+const Job            = require('../models/Job');
+const LinkedInJob    = require('../models/LinkedInJob');
+const RecruiterLookup = require('../models/RecruiterLookup');
 const { success } = require('../utils/response.util');
 const { NotFoundError } = require('../utils/errors');
 
@@ -63,27 +65,38 @@ exports.getStats = async (req, res, next) => {
 
     const [
       totalSearches,
-      totalJobs,
+      jobSearchCount,
+      linkedinJobCount,
       savedJobs,
-      appliedJobs,
-      interviewJobs,
+      appliedJobSearch,
+      appliedLinkedIn,
+      interviewJobSearch,
+      interviewLinkedIn,
       emailsSent,
+      totalRecruiters,
     ] = await Promise.all([
       JobSearch.countDocuments({ userId }),
       Job.countDocuments({ userId }),
+      LinkedInJob.countDocuments({ userId }),
       Job.countDocuments({ userId, status: 'saved' }),
       Job.countDocuments({ userId, status: 'applied' }),
+      LinkedInJob.countDocuments({ userId, status: 'applied' }),
       Job.countDocuments({ userId, status: 'interview' }),
+      LinkedInJob.countDocuments({ userId, status: 'applied' }), // no interview state on LinkedInJob
       ActivityLog.countDocuments({ userId, event: 'email.sent' }),
+      RecruiterLookup.countDocuments({ userId }).catch(() => 0),
     ]);
 
     return success(res, {
       totalSearches,
-      totalJobs,
+      totalJobs:     jobSearchCount + linkedinJobCount,
+      jobSearchCount,
+      linkedinJobCount,
       savedJobs,
-      appliedJobs,
-      interviewJobs,
+      appliedJobs:   appliedJobSearch + appliedLinkedIn,
+      interviewJobs: interviewJobSearch,
       emailsSent,
+      totalRecruiters,
     });
   } catch (err) {
     next(err);
