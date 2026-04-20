@@ -679,54 +679,79 @@ exports.fetchDescription = async (req, res, next) => {
     const axios   = require('axios');
     const cheerio = require('cheerio');
 
-    const { data: html } = await axios.get(job.url, {
-      headers: {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Cache-Control':   'no-cache',
-      },
-      timeout: 15000,
-      maxRedirects: 5,
-    });
-
-    const $ = cheerio.load(html);
+    // Extract LinkedIn job ID from any URL format:
+    // /jobs/view/1234567, /comm/jobs/view/1234567, etc.
+    const jobIdMatch = job.url.match(/\/jobs\/view\/(\d+)/);
+    const linkedinJobId = jobIdMatch?.[1];
 
     let description = '';
 
-    // 1. JSON-LD structured data (most reliable — LinkedIn embeds full description here)
-    $('script[type="application/ld+json"]').each((_, el) => {
-      if (description) return;
+    // 1. LinkedIn guest API — works without login, returns full HTML description
+    if (linkedinJobId) {
       try {
-        const json = JSON.parse($(el).html());
-        if (json.description) description = json.description;
+        const { data: guestHtml } = await axios.get(
+          `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${linkedinJobId}`,
+          {
+            headers: {
+              'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Accept':          'text/html,application/xhtml+xml',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+            timeout: 12000,
+          }
+        );
+        const $g = cheerio.load(guestHtml);
+        description =
+          $g('.show-more-less-html__markup').html()?.trim() ||
+          $g('.description__text').html()?.trim()           ||
+          $g('[class*="description"]').first().html()?.trim() || '';
+
+        // Also try to enrich company/location if missing
+        if (!job.company) {
+          const company = $g('.topcard__org-name-link, .topcard__flavor--black-link').first().text().trim();
+          if (company) await LinkedInJob.findByIdAndUpdate(req.params.id, { company });
+        }
+        if (!job.location) {
+          const location = $g('.topcard__flavor--bullet').first().text().trim();
+          if (location) await LinkedInJob.findByIdAndUpdate(req.params.id, { location });
+        }
+      } catch (err) {
+        logger.warn(`LinkedIn guest API failed for job ${linkedinJobId}: ${err.message}`);
+      }
+    }
+
+    // 2. Fallback: JSON-LD on the public job page
+    if (!description && linkedinJobId) {
+      try {
+        const { data: html } = await axios.get(
+          `https://www.linkedin.com/jobs/view/${linkedinJobId}`,
+          {
+            headers: {
+              'User-Agent': 'LinkedInBot/1.0 (compatible; LinkedInBot/1.0; +http://www.linkedin.com)',
+              'Accept': 'text/html',
+            },
+            timeout: 12000,
+            maxRedirects: 3,
+          }
+        );
+        const $p = cheerio.load(html);
+        $p('script[type="application/ld+json"]').each((_, el) => {
+          if (description) return;
+          try {
+            const json = JSON.parse($p(el).html());
+            if (json.description) description = json.description;
+          } catch {}
+        });
       } catch {}
-    });
-
-    // 2. Meta / OG tags
-    if (!description) {
-      description =
-        $('meta[name="description"]').attr('content') ||
-        $('meta[property="og:description"]').attr('content') ||
-        '';
     }
 
-    // 3. HTML selectors (static shell LinkedIn sometimes renders)
-    if (!description) {
-      description =
-        $('.show-more-less-html__markup').text().trim()      ||
-        $('.description__text').text().trim()                ||
-        $('.jobs-description__content').text().trim()        ||
-        $('[class*="description-content"]').text().trim()    ||
-        $('div[class*="description"]').first().text().trim() ||
-        '';
-    }
-
-    // Clean up
-    description = description
-      .replace(/<[^>]+>/g, ' ')        // strip any html tags from JSON-LD
-      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
-      .replace(/\s{3,}/g, '\n\n')
+    // Strip HTML tags and clean up
+    description = (description || '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/?(p|li|ul|ol|h[1-6])[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'")
+      .replace(/\n{3,}/g, '\n\n')
       .replace(/[ \t]+/g, ' ')
       .trim();
 
