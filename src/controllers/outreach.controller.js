@@ -114,19 +114,21 @@ exports.sendEmail = async (req, res, next) => {
       throw new ValidationError('to, subject and body are required');
     }
 
-    const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'yash51217@gmail.com';
+    const ADMIN_EMAIL = process.env.ADMIN_EMAIL     || 'yash51217@gmail.com';
     const ADMIN_PASS  = process.env.ADMIN_EMAIL_PASS || process.env.SMTP_PASS || '';
 
-    const user = await User.findById(req.user._id).select('+smtpAccounts +resumeBuffer');
+    const user = await User.findById(req.user._id).select('+smtpAccounts +resumeBuffer +gmailRefreshToken +gmailAccessToken +gmailEmail');
     const defaultSmtp = (user.smtpAccounts || []).find(a => a.isDefault) || (user.smtpAccounts || [])[0];
-    const smtpUser = defaultSmtp?.email || ADMIN_EMAIL;
-    const smtpPass = defaultSmtp?.pass  || ADMIN_PASS;
+    const hasGmail    = !!user.gmailRefreshToken;
+    const smtpUser    = defaultSmtp?.email || ADMIN_EMAIL;
+    const smtpPass    = defaultSmtp?.pass  || ADMIN_PASS;
 
-    if (!smtpUser || !smtpPass) {
-      throw new ValidationError('Email credentials not configured. Please add your Gmail in Profile → Email Setup.');
+    // With OAuth the smtp.service handles auth itself; only hard-fail if no method at all
+    if (!hasGmail && !defaultSmtp && !ADMIN_PASS) {
+      throw new ValidationError('Email credentials not configured. Please connect your Gmail in Profile → Email Setup.');
     }
 
-    const usingAdminFallback = !defaultSmtp && smtpUser === ADMIN_EMAIL;
+    const usingAdminFallback = !hasGmail && !defaultSmtp && smtpUser === ADMIN_EMAIL;
 
     // Build attachments array
     const attachments = [];
@@ -197,8 +199,8 @@ exports.sendEmail = async (req, res, next) => {
 
     if (!jobQueueId) {
       // Queue unavailable — send directly (original synchronous path)
-      await sendOutreachEmail({ smtpUser, smtpPass, to, subject, body,
-        fromName: user.fullName || user.profile?.firstName, attachments });
+      await sendOutreachEmail({ userId: req.user._id, smtpUser, smtpPass, to, subject, body,
+        fromName: user.fullName || user.profile?.firstName, attachments, useAdminFallback: true });
       await OutreachEmail.findByIdAndUpdate(record._id, { status: 'sent', sentAt: new Date() });
       if (jobId) await Job.findOneAndUpdate(
         { _id: jobId, userId: req.user._id }, { $set: { status: 'applied', appliedAt: new Date() } }
@@ -502,158 +504,187 @@ exports.generateLatex = async (req, res, next) => {
 exports.generateResumePdf = async (req, res, next) => {
   try {
     const PDFDocument = require('pdfkit');
-    const user = await User.findById(req.user._id).select('profile fullName email');
-    const p    = user?.profile || {};
+    const user  = await User.findById(req.user._id).select('profile fullName email');
+    const p     = user?.profile || {};
     const name  = user?.fullName || `${p.firstName || ''} ${p.lastName || ''}`.trim() || 'Your Name';
-    const phone = p.phone   || '+91-XXXXXXXXXX';
+    const phone = p.phone || '+91-8411097644';
     const email = user?.email || '';
-    const city  = p.city    || 'Mumbai, India';
+    const city  = p.city  || 'Mumbai, India';
 
-    const doc = new PDFDocument({ size: 'LETTER', margins: { top: 36, bottom: 36, left: 48, right: 48 } });
+    const doc    = new PDFDocument({ size: 'LETTER', margins: { top: 40, bottom: 40, left: 50, right: 50 } });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
 
     await new Promise((resolve) => {
       doc.on('end', resolve);
 
-      // ── Helpers ──────────────────────────────────────────────
-      const W       = doc.page.width - 96; // usable width
-      const LEFT    = 48;
-      const GRAY    = '#444444';
-      const BLACK   = '#000000';
-      const RULE    = '#cccccc';
+      const W     = doc.page.width - 100;   // usable width
+      const L     = 50;                      // left margin
+      const BLACK = '#000000';
+      const DARK  = '#111111';
+      const MID   = '#555555';
 
-      const sectionHeader = (title) => {
-        doc.moveDown(0.4)
-           .font('Helvetica-Bold').fontSize(11).fillColor(BLACK)
-           .text(title.toUpperCase(), LEFT, doc.y, { width: W })
-           .moveDown(0.1);
+      // ─ helpers ────────────────────────────────────────────────
+
+      // Draw a full-width rule then advance
+      const rule = (color = '#bbbbbb', weight = 0.5) => {
         const y = doc.y;
-        doc.moveTo(LEFT, y).lineTo(LEFT + W, y).strokeColor(RULE).lineWidth(0.5).stroke();
-        doc.moveDown(0.3);
+        doc.moveTo(L, y).lineTo(L + W, y).strokeColor(color).lineWidth(weight).stroke();
+        doc.y = y + 4;
       };
 
-      const bullet = (text) => {
-        const bx = LEFT + 10;
-        const bw = W - 10;
-        doc.font('Helvetica').fontSize(9).fillColor(BLACK);
-        doc.circle(bx - 5, doc.y + 4, 1.5).fill(BLACK);
-        doc.text(text, bx, doc.y - 9, { width: bw });
-        doc.moveDown(0.15);
-      };
-
-      const twoCol = (left, right, leftFont = 'Helvetica-Bold', size = 9.5) => {
-        const y = doc.y;
-        doc.font(leftFont).fontSize(size).fillColor(BLACK).text(left, LEFT, y, { width: W * 0.72, continued: false });
-        doc.font('Helvetica').fontSize(size).fillColor(GRAY).text(right, LEFT + W * 0.72, y, { width: W * 0.28, align: 'right' });
+      // Section header: BOLD CAPS + underline rule
+      const section = (title) => {
+        doc.moveDown(0.5);
+        doc.font('Helvetica-Bold').fontSize(10.5).fillColor(DARK)
+           .text(title.toUpperCase(), L, doc.y, { width: W });
         doc.moveDown(0.05);
+        rule('#888888', 0.6);
+        doc.moveDown(0.1);
       };
 
-      // ── NAME ─────────────────────────────────────────────────
-      doc.font('Helvetica-Bold').fontSize(20).fillColor(BLACK)
-         .text(name, LEFT, 36, { width: W, align: 'center' });
-      doc.moveDown(0.3);
-      doc.font('Helvetica').fontSize(9).fillColor(GRAY)
-         .text(`${phone}  |  ${email}  |  ${city}`, LEFT, doc.y, { width: W, align: 'center' });
-      doc.moveDown(0.3);
-      doc.moveTo(LEFT, doc.y).lineTo(LEFT + W, doc.y).strokeColor(BLACK).lineWidth(0.8).stroke();
-      doc.moveDown(0.4);
+      // Two-column row: left bold, right grey — both on same baseline
+      const row2 = (left, right, lFont = 'Helvetica-Bold', lSize = 9.5, rSize = 9.5) => {
+        const y = doc.y;
+        // Right side first (doesn't advance Y if we use explicit coords)
+        doc.font('Helvetica').fontSize(rSize).fillColor(MID)
+           .text(right, L, y, { width: W, align: 'right' });
+        // Left side over the same line
+        doc.font(lFont).fontSize(lSize).fillColor(DARK)
+           .text(left, L, y, { width: W * 0.68 });
+      };
 
-      // ── EDUCATION ────────────────────────────────────────────
-      sectionHeader('Education');
-      twoCol('Mumbai University', 'Mumbai, India');
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Master of Computer Applications', LEFT, doc.y, { continued: false });
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Jan. 2024 – Jan. 2026', LEFT, doc.y - 11, { width: W, align: 'right' });
-      doc.moveDown(0.5);
-      twoCol('Somaiya Vidyavihar University', 'Mumbai, India');
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Bachelor of Information Technology  |  GPA: 8.6 CGPA', LEFT, doc.y, { continued: false });
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Jan. 2020 – Jan. 2023', LEFT, doc.y - 11, { width: W, align: 'right' });
-      doc.moveDown(0.3);
+      // Italic sub-row: company/degree on left, date on right
+      const row2italic = (left, right) => {
+        const y = doc.y;
+        doc.font('Helvetica').fontSize(9).fillColor(MID)
+           .text(right, L, y, { width: W, align: 'right' });
+        doc.font('Helvetica-Oblique').fontSize(9).fillColor(MID)
+           .text(left, L, y, { width: W * 0.68 });
+      };
 
-      // ── EXPERIENCE ───────────────────────────────────────────
-      sectionHeader('Experience');
-      twoCol('Software Developer & Team Lead (MERN Stack Developer)', 'Mar. 2026 – Present');
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Konnect Insights', LEFT, doc.y, { continued: false });
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Mumbai, India', LEFT, doc.y - 11, { width: W, align: 'right' });
+      // Bullet point
+      const bullet = (text) => {
+        const y  = doc.y;
+        const bx = L + 11;
+        // Draw bullet dot at the vertical center of the first text line (~5pt down)
+        doc.circle(L + 4, y + 5, 1.5).fill(DARK);
+        doc.font('Helvetica').fontSize(9).fillColor(DARK)
+           .text(text, bx, y, { width: W - 11 });
+      };
+
+      // Project heading row
+      const projectHeading = (title, tech, year) => {
+        const y = doc.y;
+        doc.font('Helvetica').fontSize(9).fillColor(MID)
+           .text(year, L, y, { width: W, align: 'right' });
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(DARK)
+           .text(title, L, y, { continued: true })
+           .font('Helvetica').fillColor(MID).text(`  |  ${tech}`, { width: W * 0.82 });
+      };
+
+      // ─ NAME / HEADER ──────────────────────────────────────────
+      doc.font('Helvetica-Bold').fontSize(22).fillColor(BLACK)
+         .text(name, L, 40, { width: W, align: 'center' });
+      doc.moveDown(0.25);
+      doc.font('Helvetica').fontSize(9).fillColor(MID)
+         .text(`${phone}  |  ${email}  |  ${city}`, L, doc.y, { width: W, align: 'center' });
+      doc.moveDown(0.3);
+      rule(BLACK, 0.8);
       doc.moveDown(0.2);
+
+      // ─ EDUCATION ─────────────────────────────────────────────
+      section('Education');
+
+      row2('Mumbai University', 'Mumbai, India');
+      doc.moveDown(0.1);
+      row2italic('Master of Computer Applications', 'Jan. 2024 – Jan. 2026');
+      doc.moveDown(0.45);
+
+      row2('Somaiya Vidyavihar University', 'Mumbai, India');
+      doc.moveDown(0.1);
+      row2italic('Bachelor of Information Technology  |  GPA: 8.6 CGPA', 'Jan. 2020 – Jan. 2023');
+      doc.moveDown(0.3);
+
+      // ─ EXPERIENCE ────────────────────────────────────────────
+      section('Experience');
+
+      row2('Software Developer & Team Lead (MERN Stack Developer)', 'Mar. 2026 – Present');
+      doc.moveDown(0.1);
+      row2italic('Konnect Insights', 'Mumbai, India');
+      doc.moveDown(0.15);
       bullet('Promoted to Team Lead, overseeing development workflow, conducting code reviews, and mentoring junior developers.');
+      doc.moveDown(0.05);
       bullet('Drive sprint planning and task delegation, ensuring on-time delivery of features across the team.');
-      doc.moveDown(0.3);
-      twoCol('Software Developer', 'Jun. 2023 – Feb. 2026');
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Konnect Insights', LEFT, doc.y, { continued: false });
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
-         .text('Mumbai, India', LEFT, doc.y - 11, { width: W, align: 'right' });
-      doc.moveDown(0.2);
+      doc.moveDown(0.35);
+
+      row2('Software Developer', 'Jun. 2023 – Feb. 2026');
+      doc.moveDown(0.1);
+      row2italic('Konnect Insights', 'Mumbai, India');
+      doc.moveDown(0.15);
       bullet('Developed and maintained scalable web applications using the MERN stack, enhancing internal tooling and customer-facing products.');
+      doc.moveDown(0.05);
       bullet('Led development of an internal CMS tool used across departments for content management and analytics.');
+      doc.moveDown(0.05);
       bullet('Integrated third-party APIs and improved backend performance by optimizing MongoDB queries, implementing caching, and ensuring efficient data retrieval.');
+      doc.moveDown(0.05);
       bullet('Collaborated with cross-functional teams to deliver new features, reducing bug reports by 30% through agile methodologies.');
       doc.moveDown(0.3);
 
-      // ── PROJECTS ─────────────────────────────────────────────
-      sectionHeader('Projects');
+      // ─ PROJECTS ──────────────────────────────────────────────
+      section('Projects');
 
-      const project = (title, tech, year, bullets) => {
-        const y = doc.y;
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(BLACK)
-           .text(`${title}  `, LEFT, y, { continued: true })
-           .font('Helvetica').fillColor(GRAY).text(`| ${tech}`, { continued: false });
-        doc.font('Helvetica').fontSize(9).fillColor(GRAY)
-           .text(year, LEFT, y, { width: W, align: 'right' });
-        doc.moveDown(0.15);
-        bullets.forEach(b => bullet(b));
+      projectHeading('Job Search Automation Bot', 'Python, Selenium, LinkedIn API, Node.js, MongoDB', '2026');
+      doc.moveDown(0.15);
+      bullet('Built an end-to-end job hunting bot that automatically searches listings, scrapes HR emails and LinkedIn profiles.');
+      doc.moveDown(0.05);
+      bullet('Automated personalized outreach emails requesting referrals, reducing manual job search time by 80%.');
+      doc.moveDown(0.05);
+      bullet('Implemented anti-detection mechanisms and rate limiting to ensure stable, long-running automation.');
+      doc.moveDown(0.25);
+
+      projectHeading('Real-Time Fantasy Gaming App', 'React, Node.js, Express, MongoDB, WebSockets, JWT', '2025');
+      doc.moveDown(0.15);
+      bullet('Built a live fantasy sports platform with real-time scoring through WebSockets.');
+      doc.moveDown(0.05);
+      bullet('Implemented JWT-based authentication; optimized MongoDB queries for high concurrency and performance.');
+      doc.moveDown(0.25);
+
+      projectHeading('YouTube Video Automation', 'Python, FFmpeg, Telegram Bot API, YouTube Data API', '2026');
+      doc.moveDown(0.15);
+      bullet('Developed a Telegram-controlled pipeline that generates, edits, and auto-publishes videos to YouTube channels.');
+      doc.moveDown(0.05);
+      bullet('Integrated AI script generation, text-to-speech, and FFmpeg for automated video assembly and rendering.');
+      doc.moveDown(0.25);
+
+      projectHeading('Product Shipping Software', 'React, Node.js, MongoDB', '2025');
+      doc.moveDown(0.15);
+      bullet('Built a production logistics application managing shipments, customer details, and real-time order tracking.');
+      doc.moveDown(0.05);
+      bullet('Designed scalable REST APIs and responsive UI; actively deployed in a live business environment.');
+      doc.moveDown(0.3);
+
+      // ─ TECHNICAL SKILLS ──────────────────────────────────────
+      section('Technical Skills');
+
+      const skillLine = (label, val) => {
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(DARK)
+           .text(`${label}: `, L, doc.y, { continued: true })
+           .font('Helvetica').fillColor(MID).text(val, { width: W });
         doc.moveDown(0.2);
       };
 
-      project('Job Search Automation Bot', 'Python, Selenium, LinkedIn API, Node.js, MongoDB', '2026', [
-        'Built an end-to-end job hunting bot that automatically searches listings, scrapes HR emails and LinkedIn profiles.',
-        'Automated personalized outreach emails requesting referrals, reducing manual job search time by 80%.',
-        'Implemented anti-detection mechanisms and rate limiting to ensure stable, long-running automation.',
-      ]);
-      project('Real-Time Fantasy Gaming App', 'React, Node.js, Express, MongoDB, WebSockets, JWT', '2025', [
-        'Built a live fantasy sports platform with real-time scoring through WebSockets.',
-        'Implemented JWT-based authentication; optimized MongoDB queries for high concurrency and performance.',
-      ]);
-      project('YouTube Video Automation', 'Python, FFmpeg, Telegram Bot API, YouTube Data API', '2026', [
-        'Developed a Telegram-controlled pipeline that generates, edits, and auto-publishes videos to YouTube channels.',
-        'Integrated AI script generation, text-to-speech, and FFmpeg for automated video assembly and rendering.',
-      ]);
-      project('Product Shipping Software', 'React, Node.js, MongoDB', '2025', [
-        'Built a production logistics application managing shipments, customer details, and real-time order tracking.',
-        'Designed scalable REST APIs and responsive UI; actively deployed in a live business environment.',
-      ]);
-
-      // ── TECHNICAL SKILLS ─────────────────────────────────────
-      sectionHeader('Technical Skills');
-      const skillRow = (label, value) => {
-        const y = doc.y;
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(BLACK)
-           .text(`${label}: `, LEFT, y, { continued: true })
-           .font('Helvetica').fillColor(GRAY).text(value);
-        doc.moveDown(0.2);
-      };
-      skillRow('Languages',          'JavaScript, TypeScript, Python, C#, C++, SQL, HTML, CSS');
-      skillRow('Frameworks',         'React, Node.js, Express, MERN Stack, .NET (ASP.NET MVC), Prisma ORM');
-      skillRow('Tools & Technologies','MongoDB, REST APIs, JWT, WebSockets, Docker, Git, Postman, Figma, CI/CD');
-      skillRow('Soft Skills',        'Communication, Problem Solving, Teamwork, Time Management, Agile Development, Leadership');
+      skillLine('Languages',           'JavaScript, TypeScript, Python, C#, C++, SQL, HTML, CSS');
+      skillLine('Frameworks',          'React, Node.js, Express, MERN Stack, .NET (ASP.NET MVC), Prisma ORM');
+      skillLine('Tools & Technologies','MongoDB, REST APIs, JWT, WebSockets, Docker, Git, Postman, Figma, CI/CD');
+      skillLine('Soft Skills',         'Communication, Problem Solving, Teamwork, Time Management, Agile Development, Leadership');
 
       doc.end();
     });
 
     const pdfBuffer = Buffer.concat(chunks);
     const safeName  = name.replace(/\s+/g, '_');
-
-    return success(res, {
-      resumeBuffer:   pdfBuffer.toString('base64'),
-      filename:       `${safeName}_Resume.pdf`,
-    });
+    return success(res, { resumeBuffer: pdfBuffer.toString('base64'), filename: `${safeName}_Resume.pdf` });
   } catch (err) { next(err); }
 };
 
