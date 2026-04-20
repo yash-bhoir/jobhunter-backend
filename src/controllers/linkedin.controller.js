@@ -19,18 +19,10 @@ exports.getJobs = async (req, res, next) => {
     const filter = { userId: req.user._id };
     if (status) filter.status = status;
     if (source === 'email') {
-      // Match both new format (email_*) and old format (linkedin_email_alert)
-      filter.source = { $in: [
-        'linkedin_email_alert',
-        'email_linkedin', 'email_naukri', 'email_indeed', 'email_foundit',
-        'email_internshala', 'email_timesjobs', 'email_shine', 'email_instahyre',
-        'email_hirist', 'email_alert', 'email_email_alert',
-      ]};
+      // Matches both 'linkedin_email_alert' (old) and 'email_*' (new) — both contain 'email'
+      filter.source = { $regex: 'email', $options: 'i' };
     } else if (source) {
-      // Also accept old format when filtering specific portal
-      filter.source = source === 'email_linkedin'
-        ? { $in: [source, 'linkedin_email_alert'] }
-        : source;
+      filter.source = source;
     }
 
     const [jobs, total] = await Promise.all([
