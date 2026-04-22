@@ -56,6 +56,27 @@ const userSchema = new mongoose.Schema({
     totalExperience:    String,
   },
 
+  /** Up to 3 resumes; each has its own buffer. Legacy `resume` + `resumeBuffer` mirror the default item. */
+  resumeItems: {
+    type: [{
+      name:                 { type: String, trim: true },
+      originalName:         { type: String, required: true },
+      url:                    String,
+      publicId:             String,
+      uploadedAt:           { type: Date, default: Date.now },
+      isDefault:            { type: Boolean, default: false },
+      isParsed:             { type: Boolean, default: false },
+      extractedSkills:      [String],
+      extractedCompanies:   [String],
+      summary:              String,
+      totalExperience:      String,
+      parsedAt:             Date,
+      /** Named pdfBuffer (not resumeBuffer) to avoid Mongoose path collision with top-level `resumeBuffer` when selecting both. */
+      pdfBuffer:            { type: Buffer, select: false },
+    }],
+    default: undefined,
+  },
+
   // Raw PDF buffer stored in DB so optimization/attachment never depends on Cloudinary CDN
   resumeBuffer:     { type: Buffer, select: false },
   // Original DOCX buffer — enables pixel-perfect keyword patching (XML find/replace)
@@ -202,6 +223,39 @@ userSchema.methods.toSafeObject = function () {
   delete obj.passwordResetToken;
   delete obj.passwordResetExpires;
   delete obj.smtpAccounts;
+  delete obj.resumeBuffer;
+  delete obj.resumeDocxBuffer;
+  const stripBuffers = (items) => (items || []).map((r) => {
+    const row = { ...r };
+    delete row.pdfBuffer;
+    return row;
+  });
+  let resumes = stripBuffers(this.resumeItems);
+  if (!resumes.length && this.resume?.url) {
+    resumes = [{
+      _id:          null,
+      name:         this.resume.originalName,
+      originalName: this.resume.originalName,
+      url:          this.resume.url,
+      publicId:     this.resume.publicId,
+      uploadedAt:   this.resume.uploadedAt,
+      isDefault:    true,
+      isParsed:     this.resume.isParsed,
+      extractedSkills: this.resume.extractedSkills,
+      legacy:       true,
+    }];
+  }
+  obj.resumeItems = resumes;
+  obj.resumes = resumes.map((r) => ({
+    id:           r._id,
+    name:         r.name || r.originalName,
+    originalName: r.originalName,
+    url:          r.url,
+    uploadedAt:   r.uploadedAt,
+    isDefault:    !!r.isDefault,
+    isParsed:     !!r.isParsed,
+    legacy:       !!r.legacy,
+  }));
   return obj;
 };
 

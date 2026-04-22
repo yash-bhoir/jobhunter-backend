@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const logger   = require('./logger');
+const { migrateResumeItemsPdfBuffer } = require('../migrations/migrateResumeItemsPdfBuffer');
 
 const connectDB = async () => {
   const conn = await mongoose.connect(process.env.MONGODB_URI, {
@@ -17,6 +18,12 @@ const connectDB = async () => {
   });
 
   logger.info(`MongoDB connected: ${conn.connection.host} (pool 10→100)`);
+
+  try {
+    await migrateResumeItemsPdfBuffer();
+  } catch (e) {
+    logger.warn('[migrate] migrateResumeItemsPdfBuffer:', e.message);
+  }
 
   mongoose.connection.on('error',        (err) => logger.error('MongoDB error:',       err.message));
   mongoose.connection.on('disconnected', ()    => logger.warn ('MongoDB disconnected — will auto-reconnect'));

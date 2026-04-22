@@ -559,6 +559,7 @@ const optimizeResumeForJob = async ({
   resumeDbBuffer,      // MongoDB-stored buffer — highest priority, no CDN needed
   resumeDocxBuffer,    // Original DOCX — enables pixel-perfect keyword patching
   userProvidedText,
+  profileFallbackText, // profile-derived text when PDF extraction is empty
   existingSkills,
   jobTitle,
   jobDescription,
@@ -598,11 +599,15 @@ const optimizeResumeForJob = async ({
     }
   }
 
-  // If we could not get resume text, require the user to paste it.
+  if (!originalText.trim() && profileFallbackText?.trim()) {
+    originalText = profileFallbackText.trim();
+  }
+
+  // If we could not get resume text, surface a clear error (profile fallback already tried)
   if (!originalText.trim()) {
     const err = new Error(
-      'PASTE_REQUIRED: Your resume file could not be downloaded. ' +
-      'Please click "Paste resume text", paste your full resume content, then click Optimize again.'
+      'RESUME_TEXT_UNAVAILABLE: Could not read text from your resume file. ' +
+      'Try re-uploading a text-based PDF, upload a .docx in Profile, or complete your Profile skills and summary.'
     );
     err.code = 'PASTE_REQUIRED';
     throw err;

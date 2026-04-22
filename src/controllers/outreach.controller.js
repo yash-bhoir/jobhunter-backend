@@ -44,9 +44,37 @@ exports.getEmails = async (req, res, next) => {
 };
 
 // ── Generate AI email ─────────────────────────────────────────────
+exports.saveDraft = async (req, res, next) => {
+  try {
+    const { subject, body, resumeId } = req.body;
+    const draft = await OutreachEmail.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!draft) throw new NotFoundError('Draft not found');
+    if (draft.status === 'sent') throw new ValidationError('Cannot edit a sent email');
+    const update = {};
+    if (subject !== undefined) update.subject = subject;
+    if (body !== undefined) update.body = body;
+    if (resumeId !== undefined) update.resumeId = resumeId || null;
+    const updated = await OutreachEmail.findByIdAndUpdate(draft._id, { $set: update }, { new: true }).lean();
+    return success(res, updated, 'Draft saved');
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.generateEmail = async (req, res, next) => {
   try {
-    const { company, jobTitle, jobUrl, recruiterName, jobId, jobDescription } = req.body;
+    const {
+      company,
+      jobTitle,
+      jobUrl,
+      recruiterName,
+      jobId,
+      jobDescription,
+      recipientEmail,
+      recipientName,
+      skipCache,
+      variationIndex,
+    } = req.body;
 
     if (!company || !jobTitle) {
       throw new ValidationError('Company and job title are required');
@@ -81,18 +109,22 @@ exports.generateEmail = async (req, res, next) => {
       jobUrl,
       jobDescription: resolvedJd,
       candidate,
+      recipientEmail: recipientEmail || undefined,
+      recipientName:  recipientName  || undefined,
+      skipCache:        !!skipCache,
+      variationIndex:   Number.isFinite(Number(variationIndex)) ? Number(variationIndex) : 0,
     });
 
-    // Save as draft
+    // Persist as draft (per recipient) so edits / sends never lose content
     const draft = await OutreachEmail.create({
       userId:       req.user._id,
       jobId:        jobId || null,
-      to:           '',
+      to:           (recipientEmail || '').trim(),
       subject:      result.subject,
       body:         result.body,
       company,
       recruiterName,
-      status:       'pending',
+      status:       'draft',
       aiGenerated:  true,
       tokensUsed:   result.tokensUsed,
     });
@@ -144,6 +176,7 @@ exports.sendEmail = async (req, res, next) => {
       attachResume = false,          // attach original resume PDF
       resumeBuffer,                  // pre-built optimized resume (base64)
       resumeFilename,
+      resumeId,                      // User.resumeItems subdoc id
       latexTemplate,                 // LaTeX source to save in history
       resumeSnapshot,                // base64 PDF snapshot for history
     } = req.body;
@@ -155,7 +188,9 @@ exports.sendEmail = async (req, res, next) => {
     const ADMIN_EMAIL = process.env.ADMIN_EMAIL     || 'yash51217@gmail.com';
     const ADMIN_PASS  = process.env.ADMIN_EMAIL_PASS || process.env.SMTP_PASS || '';
 
-    const user = await User.findById(req.user._id).select('+smtpAccounts +resumeBuffer +gmailRefreshToken +gmailAccessToken +gmailEmail');
+    const user = await User.findById(req.user._id).select(
+      '+smtpAccounts +resumeBuffer +resumeItems.pdfBuffer +gmailRefreshToken +gmailAccessToken +gmailEmail resumeItems resume',
+    );
     const defaultSmtp = (user.smtpAccounts || []).find(a => a.isDefault) || (user.smtpAccounts || [])[0];
     const hasGmail    = !!user.gmailRefreshToken;
     const smtpUser    = defaultSmtp?.email || ADMIN_EMAIL;
@@ -179,38 +214,46 @@ exports.sendEmail = async (req, res, next) => {
         contentType: 'application/pdf',
       });
     } else if (attachResume) {
-      // User wants original resume attached
-      if (!user.resume?.url && !user.resume?.buffer) {
-        return res.status(400).json({
-          success: false,
-          message: 'No resume found on your profile. Upload one in Profile → Resume first.',
-          code: 'NO_RESUME',
-        });
+      let buf = null;
+      let name = 'resume.pdf';
+      const rid = resumeId || null;
+      if (rid && (user.resumeItems || []).length) {
+        const item = user.resumeItems.id(rid);
+        if (item?.pdfBuffer?.length) {
+          buf = item.pdfBuffer;
+          name = item.originalName || name;
+        } else if (item?.url) {
+          buf = await downloadPdfBuffer(item.url, item.publicId);
+          name = item.originalName || name;
+        }
       }
-      // Primary: use MongoDB-stored buffer (never blocked by CDN)
-      let buf = user.resumeBuffer || null;
-      // Fallback: try Cloudinary if MongoDB buffer missing (old uploads)
+      if (!buf && user.resumeBuffer) {
+        buf = user.resumeBuffer;
+        name = user.resume?.originalName || name;
+      }
       if (!buf && user.resume?.url) {
         buf = await downloadPdfBuffer(user.resume.url, user.resume.publicId);
+        name = user.resume.originalName || name;
       }
       if (!buf) {
         return res.status(400).json({
           success: false,
-          message: 'Could not retrieve your resume. Please re-upload it in Profile → Resume.',
-          code: 'RESUME_DOWNLOAD_FAILED',
+          message: 'No resume file found for attachment. Upload a resume in Profile or pick another slot.',
+          code: 'NO_RESUME',
         });
       }
-      const name = user.resume.originalName || 'resume.pdf';
       attachments.push({ filename: name, content: buf, contentType: 'application/pdf' });
-      logger.info(`Resume attached from ${user.resumeBuffer ? 'DB' : 'Cloudinary'}: ${name} (${buf.length} bytes)`);
+      logger.info(`Resume attached: ${name} (${buf.length} bytes)`);
     }
 
     // Create pending record immediately so frontend sees it in history
+    const rid = resumeId || null;
     const record = emailId
       ? await OutreachEmail.findByIdAndUpdate(emailId, {
           to, subject, body, company, recruiterName,
           status: 'pending', senderEmail: smtpUser,
           resumeAttached: !!(resumeBuffer || attachResume),
+          ...(rid && { resumeId: rid }),
           ...(latexTemplate    && { latexTemplate }),
           ...(resumeSnapshot   && { resumeSnapshot }),
         }, { new: true })
@@ -219,6 +262,7 @@ exports.sendEmail = async (req, res, next) => {
           to, subject, body, company, recruiterName,
           status: 'pending', senderEmail: smtpUser, aiGenerated: false,
           resumeAttached: !!(resumeBuffer || attachResume),
+          ...(rid && { resumeId: rid }),
           ...(latexTemplate    && { latexTemplate }),
           ...(resumeSnapshot   && { resumeSnapshot }),
         });
@@ -368,371 +412,90 @@ exports.bulkSend = async (req, res, next) => {
 // ── Get stats ─────────────────────────────────────────────────────
 exports.getStats = async (req, res, next) => {
   try {
-    const [total, sent, pending, replied] = await Promise.all([
+    const [total, sent, pending, draft, replied] = await Promise.all([
       OutreachEmail.countDocuments({ userId: req.user._id }),
       OutreachEmail.countDocuments({ userId: req.user._id, status: 'sent' }),
       OutreachEmail.countDocuments({ userId: req.user._id, status: 'pending' }),
+      OutreachEmail.countDocuments({ userId: req.user._id, status: 'draft' }),
       OutreachEmail.countDocuments({ userId: req.user._id, status: 'replied' }),
     ]);
 
-    return success(res, { total, sent, pending, replied });
+    return success(res, { total, sent, pending, draft, replied });
   } catch (err) {
     next(err);
   }
 };
 
-// ── Generate LaTeX resume from user profile ───────────────────────
+// ── Generate LaTeX resume from user profile (sb2nov-style, data-driven) ──
 exports.generateLatex = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('profile fullName email');
-    const p    = user?.profile || {};
-    const name = user?.fullName || `${p.firstName || ''} ${p.lastName || ''}`.trim() || 'Your Name';
-    const phone = p.phone || '+91-XXXXXXXXXX';
-    const email = user?.email || '';
-    const city  = p.city || 'Mumbai, India';
-
-    // Skills from profile
-    const skills = (p.skills || []).join(', ') || 'JavaScript, React, Node.js, MongoDB';
-
-    const latex = `%-------------------------
-% Resume in Latex
-% Author : Jake Gutierrez
-% Based off of: https://github.com/sb2nov/resume
-%------------------------
-
-\\documentclass[letterpaper,10.5pt]{article}
-
-\\usepackage{latexsym}
-\\usepackage[empty]{fullpage}
-\\usepackage{titlesec}
-\\usepackage{marvosym}
-\\usepackage[usenames,dvipsnames]{color}
-\\usepackage{verbatim}
-\\usepackage{enumitem}
-\\usepackage[hidelinks]{hyperref}
-\\usepackage{fancyhdr}
-\\usepackage[english]{babel}
-\\usepackage{tabularx}
-\\input{glyphtounicode}
-
-\\pagestyle{fancy}
-\\fancyhf{}
-\\fancyfoot{}
-\\renewcommand{\\headrulewidth}{0pt}
-\\renewcommand{\\footrulewidth}{0pt}
-
-\\addtolength{\\oddsidemargin}{-0.5in}
-\\addtolength{\\evensidemargin}{-0.5in}
-\\addtolength{\\textwidth}{1in}
-\\addtolength{\\topmargin}{-.7in}
-\\addtolength{\\textheight}{1.5in}
-
-\\urlstyle{same}
-\\raggedbottom
-\\raggedright
-\\setlength{\\tabcolsep}{0in}
-
-\\titleformat{\\section}{
-  \\vspace{-6pt}\\scshape\\raggedright\\large
-}{}{0em}{}[\\color{black}\\titlerule \\vspace{-5pt}]
-
-\\pdfgentounicode=1
-
-\\newcommand{\\resumeItem}[1]{\\item\\small{{#1 \\vspace{-2pt}}}}
-\\newcommand{\\resumeSubheading}[4]{
-  \\vspace{-2pt}\\item
-    \\begin{tabular*}{0.97\\textwidth}[t]{l@{\\extracolsep{\\fill}}r}
-      \\textbf{#1} & #2 \\\\
-      \\textit{\\small#3} & \\textit{\\small #4} \\\\
-    \\end{tabular*}\\vspace{-7pt}
-}
-\\newcommand{\\resumeProjectHeading}[2]{
-    \\item
-    \\begin{tabular*}{0.97\\textwidth}{l@{\\extracolsep{\\fill}}r}
-      \\small#1 & #2 \\\\
-    \\end{tabular*}\\vspace{-7pt}
-}
-\\newcommand{\\resumeSubItem}[1]{\\resumeItem{#1}\\vspace{-4pt}}
-\\renewcommand\\labelitemii{$\\vcenter{\\hbox{\\tiny$\\bullet$}}$}
-\\newcommand{\\resumeSubHeadingListStart}{\\begin{itemize}[leftmargin=0.15in, label={}]}
-\\newcommand{\\resumeSubHeadingListEnd}{\\end{itemize}}
-\\newcommand{\\resumeItemListStart}{\\begin{itemize}[topsep=0pt]}
-\\newcommand{\\resumeItemListEnd}{\\end{itemize}\\vspace{-5pt}}
-
-\\begin{document}
-
-%----------HEADING----------
-\\begin{center}
-    \\textbf{\\Huge \\scshape ${name.replace(/&/g,'\\&').replace(/#/g,'\\#')}} \\\\ \\vspace{1pt}
-    \\small ${phone} $|$
-    \\href{mailto:${email}}{\\underline{${email}}} $|$
-    ${city}
-\\end{center}
-
-%-----------EXPERIENCE-----------
-\\section{Experience}
-  \\resumeSubHeadingListStart
-    \\resumeSubheading
-      {Software Developer \\& Team Lead (MERN Stack Developer)}{Mar. 2026 -- Present}
-      {Konnect Insights}{Mumbai, India}
-      \\resumeItemListStart
-        \\resumeItem{Promoted to Team Lead, overseeing development workflow, conducting code reviews, and mentoring junior developers.}
-        \\resumeItem{Drive sprint planning and task delegation, ensuring on-time delivery of features across the team.}
-      \\resumeItemListEnd
-    \\resumeSubheading
-      {Software Developer}{Jun. 2023 -- Feb. 2026}
-      {Konnect Insights}{Mumbai, India}
-      \\resumeItemListStart
-        \\resumeItem{Developed and maintained scalable web applications using the MERN stack, enhancing internal tooling and customer-facing products.}
-        \\resumeItem{Led development of an internal CMS tool used across departments for content management and analytics.}
-        \\resumeItem{Integrated third-party APIs and improved backend performance by optimizing MongoDB queries, implementing caching, and ensuring efficient data retrieval.}
-        \\resumeItem{Collaborated with cross-functional teams to deliver new features and enhancements, reducing bug reports by 30\\% through effective communication and agile methodologies.}
-      \\resumeItemListEnd
-  \\resumeSubHeadingListEnd
-
-%-----------PROJECTS-----------
-\\section{Projects}
-    \\resumeSubHeadingListStart
-      \\resumeProjectHeading
-          {\\textbf{Job Search Automation Bot} $|$ \\emph{Python, Selenium, LinkedIn API, Node.js, MongoDB}}{2026}
-          \\resumeItemListStart
-            \\resumeItem{Built an end-to-end job hunting bot that automatically searches listings, scrapes HR emails and LinkedIn profiles using Node.js and MongoDB.}
-            \\resumeItem{Automated personalized outreach emails requesting referrals, reducing manual job search time by 80\\%.}
-            \\resumeItem{Implemented anti-detection mechanisms and rate limiting to ensure stable, long-running automation.}
-          \\resumeItemListEnd
-      \\resumeProjectHeading
-          {\\textbf{Real-Time Fantasy Gaming App} $|$ \\emph{React, Node.js, Express, MongoDB, WebSockets, JWT}}{2025}
-          \\resumeItemListStart
-            \\resumeItem{Built a live fantasy sports platform using React and Node.js with real-time scoring through WebSockets.}
-            \\resumeItem{Implemented JWT-based authentication; optimized MongoDB queries for high concurrency and performance.}
-          \\resumeItemListEnd
-      \\resumeProjectHeading
-          {\\textbf{YouTube Video Automation} $|$ \\emph{Python, FFmpeg, Telegram Bot API, YouTube Data API}}{2026}
-          \\resumeItemListStart
-            \\resumeItem{Developed a Telegram-controlled pipeline that generates, edits, and auto-publishes videos to YouTube channels.}
-            \\resumeItem{Integrated AI script generation, text-to-speech, and FFmpeg for automated video assembly and rendering.}
-          \\resumeItemListEnd
-      \\resumeProjectHeading
-          {\\textbf{Product Shipping Software} $|$ \\emph{React, Node.js, MongoDB}}{2025}
-          \\resumeItemListStart
-            \\resumeItem{Built a production logistics application managing shipments, customer details, and real-time order tracking.}
-            \\resumeItem{Designed scalable REST APIs and responsive UI; actively deployed in a live business environment.}
-          \\resumeItemListEnd
-    \\resumeSubHeadingListEnd
-
-%-----------TECHNICAL SKILLS-----------
-\\section{Technical Skills}
- \\begin{itemize}[leftmargin=0.15in, label={}]
-    \\small{\\item{
-     \\textbf{Languages}{: JavaScript, TypeScript, Python, C\\#, C++, SQL, HTML, CSS} \\\\
-     \\textbf{Frameworks}{: React, Node.js, Express, MERN Stack, .NET (ASP.NET MVC), Prisma ORM} \\\\
-     \\textbf{Tools \\& Technologies}{: MongoDB, REST APIs, JWT, WebSockets, Docker, Git, Postman, Figma, CI/CD} \\\\
-     \\textbf{Soft Skills}{: Communication, Problem Solving, Teamwork, Time Management, Agile Development, Leadership}
-    }}
- \\end{itemize}
-
-%-----------EDUCATION-----------
-\\section{Education}
-  \\resumeSubHeadingListStart
-    \\resumeSubheading
-      {Mumbai University}{Mumbai, India}
-      {Master of Computer Applications}{Jan. 2024 -- Jan. 2026}
-    \\resumeSubheading
-      {Somaiya Vidyavihar University}{Mumbai, India}
-      {Bachelor of Information Technology $|$ GPA: 8.6 CGPA}{Jan. 2020 -- Jan. 2023}
-  \\resumeSubHeadingListEnd
-
-\\end{document}`;
-
+    const ResumeTemplate = require('../models/ResumeTemplate');
+    const { buildLatexForUser } = require('../services/resume/latexResume.builder');
+    const user = await User.findById(req.user._id).select('profile fullName email resume');
+    const active = await ResumeTemplate.findOne({ isActive: true }).sort({ updatedAt: -1 }).lean();
+    const opts = {};
+    if (active?.templateCode && active.templateCode.includes('{{BODY}}')) {
+      opts.templateCode = active.templateCode;
+    }
+    const latex = buildLatexForUser(user, opts);
+    const name = user?.fullName || `${user.profile?.firstName || ''} ${user.profile?.lastName || ''}`.trim() || 'Your_Name';
     return success(res, { latex, filename: `${name.replace(/\s+/g, '_')}_Resume.tex` });
   } catch (err) { next(err); }
 };
 
-// ── Generate resume PDF from profile (Jake Gutierrez style) ──────
+// ── Generate resume PDF: uploaded file (resumeId) or legacy buffer or profile one-pager ──
 exports.generateResumePdf = async (req, res, next) => {
   try {
-    const PDFDocument = require('pdfkit');
-    const user  = await User.findById(req.user._id).select('profile fullName email');
-    const p     = user?.profile || {};
-    const name  = user?.fullName || `${p.firstName || ''} ${p.lastName || ''}`.trim() || 'Your Name';
-    const phone = p.phone || '+91-8411097644';
-    const email = user?.email || '';
-    const city  = p.city  || 'Mumbai, India';
+    const resumeId = req.query.resumeId;
+    const user = await User.findById(req.user._id).select(
+      '+resumeBuffer +resumeItems.pdfBuffer profile fullName email resumeItems resume',
+    );
+    const safeBase = (user.fullName || 'Candidate').replace(/\s+/g, '_');
 
-    const doc    = new PDFDocument({ size: 'LETTER', margins: { top: 40, bottom: 40, left: 50, right: 50 } });
-    const chunks = [];
-    doc.on('data', c => chunks.push(c));
+    const tryItem = (item) => {
+      if (!item) return null;
+      if (item.pdfBuffer?.length) {
+        return { buf: item.pdfBuffer, name: item.originalName || `${safeBase}_resume.pdf` };
+      }
+      return null;
+    };
 
-    await new Promise((resolve) => {
-      doc.on('end', resolve);
+    if (resumeId && (user.resumeItems || []).length) {
+      const item = user.resumeItems.id(resumeId);
+      const got = tryItem(item);
+      if (got) {
+        return success(res, { resumeBuffer: got.buf.toString('base64'), filename: got.name });
+      }
+      if (item?.url) {
+        const buf = await downloadPdfBuffer(item.url, item.publicId);
+        if (buf) {
+          return success(res, { resumeBuffer: buf.toString('base64'), filename: item.originalName || `${safeBase}_resume.pdf` });
+        }
+      }
+    }
 
-      const W     = doc.page.width - 100;   // usable width
-      const L     = 50;                      // left margin
-      const BLACK = '#000000';
-      const DARK  = '#111111';
-      const MID   = '#555555';
+    if (user.resumeBuffer?.length) {
+      return success(res, {
+        resumeBuffer: user.resumeBuffer.toString('base64'),
+        filename:     user.resume?.originalName || `${safeBase}_resume.pdf`,
+      });
+    }
+    if (user.resume?.url) {
+      const buf = await downloadPdfBuffer(user.resume.url, user.resume.publicId);
+      if (buf) {
+        return success(res, {
+          resumeBuffer: buf.toString('base64'),
+          filename:     user.resume.originalName || `${safeBase}_resume.pdf`,
+        });
+      }
+    }
 
-      // ─ helpers ────────────────────────────────────────────────
-
-      // Draw a full-width rule then advance
-      const rule = (color = '#bbbbbb', weight = 0.5) => {
-        const y = doc.y;
-        doc.moveTo(L, y).lineTo(L + W, y).strokeColor(color).lineWidth(weight).stroke();
-        doc.y = y + 4;
-      };
-
-      // Section header: BOLD CAPS + underline rule
-      const section = (title) => {
-        doc.moveDown(0.5);
-        doc.font('Helvetica-Bold').fontSize(10.5).fillColor(DARK)
-           .text(title.toUpperCase(), L, doc.y, { width: W });
-        doc.moveDown(0.05);
-        rule('#888888', 0.6);
-        doc.moveDown(0.1);
-      };
-
-      // Two-column row: left bold, right grey — both on same baseline
-      const row2 = (left, right, lFont = 'Helvetica-Bold', lSize = 9.5, rSize = 9.5) => {
-        const y = doc.y;
-        // Right side first (doesn't advance Y if we use explicit coords)
-        doc.font('Helvetica').fontSize(rSize).fillColor(MID)
-           .text(right, L, y, { width: W, align: 'right' });
-        // Left side over the same line
-        doc.font(lFont).fontSize(lSize).fillColor(DARK)
-           .text(left, L, y, { width: W * 0.68 });
-      };
-
-      // Italic sub-row: company/degree on left, date on right
-      const row2italic = (left, right) => {
-        const y = doc.y;
-        doc.font('Helvetica').fontSize(9).fillColor(MID)
-           .text(right, L, y, { width: W, align: 'right' });
-        doc.font('Helvetica-Oblique').fontSize(9).fillColor(MID)
-           .text(left, L, y, { width: W * 0.68 });
-      };
-
-      // Bullet point
-      const bullet = (text) => {
-        const y  = doc.y;
-        const bx = L + 11;
-        // Draw bullet dot at the vertical center of the first text line (~5pt down)
-        doc.circle(L + 4, y + 5, 1.5).fill(DARK);
-        doc.font('Helvetica').fontSize(9).fillColor(DARK)
-           .text(text, bx, y, { width: W - 11 });
-      };
-
-      // Project heading row
-      const projectHeading = (title, tech, year) => {
-        const y = doc.y;
-        doc.font('Helvetica').fontSize(9).fillColor(MID)
-           .text(year, L, y, { width: W, align: 'right' });
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(DARK)
-           .text(title, L, y, { continued: true })
-           .font('Helvetica').fillColor(MID).text(`  |  ${tech}`, { width: W * 0.82 });
-      };
-
-      // ─ NAME / HEADER ──────────────────────────────────────────
-      doc.font('Helvetica-Bold').fontSize(22).fillColor(BLACK)
-         .text(name, L, 40, { width: W, align: 'center' });
-      doc.moveDown(0.25);
-      doc.font('Helvetica').fontSize(9).fillColor(MID)
-         .text(`${phone}  |  ${email}  |  ${city}`, L, doc.y, { width: W, align: 'center' });
-      doc.moveDown(0.3);
-      rule(BLACK, 0.8);
-      doc.moveDown(0.2);
-
-      // ─ EDUCATION ─────────────────────────────────────────────
-      section('Education');
-
-      row2('Mumbai University', 'Mumbai, India');
-      doc.moveDown(0.1);
-      row2italic('Master of Computer Applications', 'Jan. 2024 – Jan. 2026');
-      doc.moveDown(0.45);
-
-      row2('Somaiya Vidyavihar University', 'Mumbai, India');
-      doc.moveDown(0.1);
-      row2italic('Bachelor of Information Technology  |  GPA: 8.6 CGPA', 'Jan. 2020 – Jan. 2023');
-      doc.moveDown(0.3);
-
-      // ─ EXPERIENCE ────────────────────────────────────────────
-      section('Experience');
-
-      row2('Software Developer & Team Lead (MERN Stack Developer)', 'Mar. 2026 – Present');
-      doc.moveDown(0.1);
-      row2italic('Konnect Insights', 'Mumbai, India');
-      doc.moveDown(0.15);
-      bullet('Promoted to Team Lead, overseeing development workflow, conducting code reviews, and mentoring junior developers.');
-      doc.moveDown(0.05);
-      bullet('Drive sprint planning and task delegation, ensuring on-time delivery of features across the team.');
-      doc.moveDown(0.35);
-
-      row2('Software Developer', 'Jun. 2023 – Feb. 2026');
-      doc.moveDown(0.1);
-      row2italic('Konnect Insights', 'Mumbai, India');
-      doc.moveDown(0.15);
-      bullet('Developed and maintained scalable web applications using the MERN stack, enhancing internal tooling and customer-facing products.');
-      doc.moveDown(0.05);
-      bullet('Led development of an internal CMS tool used across departments for content management and analytics.');
-      doc.moveDown(0.05);
-      bullet('Integrated third-party APIs and improved backend performance by optimizing MongoDB queries, implementing caching, and ensuring efficient data retrieval.');
-      doc.moveDown(0.05);
-      bullet('Collaborated with cross-functional teams to deliver new features, reducing bug reports by 30% through agile methodologies.');
-      doc.moveDown(0.3);
-
-      // ─ PROJECTS ──────────────────────────────────────────────
-      section('Projects');
-
-      projectHeading('Job Search Automation Bot', 'Python, Selenium, LinkedIn API, Node.js, MongoDB', '2026');
-      doc.moveDown(0.15);
-      bullet('Built an end-to-end job hunting bot that automatically searches listings, scrapes HR emails and LinkedIn profiles.');
-      doc.moveDown(0.05);
-      bullet('Automated personalized outreach emails requesting referrals, reducing manual job search time by 80%.');
-      doc.moveDown(0.05);
-      bullet('Implemented anti-detection mechanisms and rate limiting to ensure stable, long-running automation.');
-      doc.moveDown(0.25);
-
-      projectHeading('Real-Time Fantasy Gaming App', 'React, Node.js, Express, MongoDB, WebSockets, JWT', '2025');
-      doc.moveDown(0.15);
-      bullet('Built a live fantasy sports platform with real-time scoring through WebSockets.');
-      doc.moveDown(0.05);
-      bullet('Implemented JWT-based authentication; optimized MongoDB queries for high concurrency and performance.');
-      doc.moveDown(0.25);
-
-      projectHeading('YouTube Video Automation', 'Python, FFmpeg, Telegram Bot API, YouTube Data API', '2026');
-      doc.moveDown(0.15);
-      bullet('Developed a Telegram-controlled pipeline that generates, edits, and auto-publishes videos to YouTube channels.');
-      doc.moveDown(0.05);
-      bullet('Integrated AI script generation, text-to-speech, and FFmpeg for automated video assembly and rendering.');
-      doc.moveDown(0.25);
-
-      projectHeading('Product Shipping Software', 'React, Node.js, MongoDB', '2025');
-      doc.moveDown(0.15);
-      bullet('Built a production logistics application managing shipments, customer details, and real-time order tracking.');
-      doc.moveDown(0.05);
-      bullet('Designed scalable REST APIs and responsive UI; actively deployed in a live business environment.');
-      doc.moveDown(0.3);
-
-      // ─ TECHNICAL SKILLS ──────────────────────────────────────
-      section('Technical Skills');
-
-      const skillLine = (label, val) => {
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(DARK)
-           .text(`${label}: `, L, doc.y, { continued: true })
-           .font('Helvetica').fillColor(MID).text(val, { width: W });
-        doc.moveDown(0.2);
-      };
-
-      skillLine('Languages',           'JavaScript, TypeScript, Python, C#, C++, SQL, HTML, CSS');
-      skillLine('Frameworks',          'React, Node.js, Express, MERN Stack, .NET (ASP.NET MVC), Prisma ORM');
-      skillLine('Tools & Technologies','MongoDB, REST APIs, JWT, WebSockets, Docker, Git, Postman, Figma, CI/CD');
-      skillLine('Soft Skills',         'Communication, Problem Solving, Teamwork, Time Management, Agile Development, Leadership');
-
-      doc.end();
+    const { renderProfileResumePdf } = require('../services/resume/pdfResume.builder');
+    const pdfBuffer = await renderProfileResumePdf(user);
+    return success(res, {
+      resumeBuffer: pdfBuffer.toString('base64'),
+      filename:     `${safeBase}_Profile_Resume.pdf`,
     });
-
-    const pdfBuffer = Buffer.concat(chunks);
-    const safeName  = name.replace(/\s+/g, '_');
-    return success(res, { resumeBuffer: pdfBuffer.toString('base64'), filename: `${safeName}_Resume.pdf` });
   } catch (err) { next(err); }
 };
 
@@ -756,7 +519,7 @@ exports.deleteEmail = async (req, res, next) => {
 // only skill keywords and summary phrases are updated.
 exports.optimizeResume = async (req, res, next) => {
   try {
-    const { jobTitle, jobDescription, company, resumeText: userProvidedText } = req.body;
+    const { jobTitle, jobDescription, company, resumeText: userProvidedText, resumeId } = req.body;
 
     if (!jobTitle) throw new ValidationError('jobTitle is required');
 
@@ -769,22 +532,42 @@ exports.optimizeResume = async (req, res, next) => {
       });
     }
 
-    const user = await User.findById(req.user._id).select('+resumeBuffer +resumeDocxBuffer');
+    const user = await User.findById(req.user._id).select('+resumeBuffer +resumeDocxBuffer +resumeItems.pdfBuffer resumeItems resume profile fullName');
 
-    if (!user.resume?.url && !user.resumeBuffer) {
+    const hasResumeData = !!(
+      user.resume?.url
+      || user.resumeBuffer?.length
+      || (user.resumeItems || []).some((i) => i.pdfBuffer?.length || i.url)
+    );
+    if (!hasResumeData) {
       throw new ValidationError('Upload your resume first (Profile → Resume) before optimizing.');
+    }
+
+    let resumeUrl = user.resume?.url || null;
+    let resumePublicId = user.resume?.publicId || null;
+    let resumeDbBuffer = user.resumeBuffer || null;
+    if (resumeId && (user.resumeItems || []).length) {
+      const item = user.resumeItems.id(resumeId);
+      if (item) {
+        resumeUrl = item.url || resumeUrl;
+        resumePublicId = item.publicId || resumePublicId;
+        resumeDbBuffer = item.pdfBuffer || resumeDbBuffer;
+      }
     }
 
     const userName = user.fullName ||
       `${user.profile?.firstName || ''} ${user.profile?.lastName || ''}`.trim() ||
       'Candidate';
 
+    const { buildProfileFallbackResumeText } = require('../services/resume/resumeContent.mapper');
+
     const result = await optimizeResumeForJob({
-      resumeUrl:          user.resume?.url       || null,
-      resumePublicId:     user.resume?.publicId  || null,
-      resumeDbBuffer:     user.resumeBuffer      || null,
-      resumeDocxBuffer:   user.resumeDocxBuffer  || null,  // enables exact DOCX patching
+      resumeUrl,
+      resumePublicId,
+      resumeDbBuffer,
+      resumeDocxBuffer:   user.resumeDocxBuffer  || null,
       userProvidedText:   userProvidedText       || null,
+      profileFallbackText: buildProfileFallbackResumeText(user),
       existingSkills:     user.profile?.skills   || [],
       jobTitle,
       jobDescription:     jobDescription         || '',
@@ -908,11 +691,13 @@ exports.autoOutreach = async (req, res, next) => {
       try {
         // Generate AI email
         const emailContent = await generateOutreachEmail({
-          recruiterName: job.recruiterName,
-          company:       job.company,
-          jobTitle:      job.title,
-          jobUrl:        job.url,
+          recruiterName:   job.recruiterName,
+          company:         job.company,
+          jobTitle:        job.title,
+          jobUrl:          job.url,
           candidate,
+          recipientEmail:  job.recruiterEmail,
+          recipientName:   job.recruiterName,
         });
 
         // Send email

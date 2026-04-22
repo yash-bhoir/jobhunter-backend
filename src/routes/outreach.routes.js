@@ -8,6 +8,7 @@ router.use(authenticate);
 
 router.get   ('/',                ctrl.getEmails);
 router.post  ('/generate',        requireCredits('AI_EMAIL'),          ctrl.generateEmail);
+router.patch ('/drafts/:id',      ctrl.saveDraft);
 router.post  ('/enhance',         requireCredits('AI_EMAIL'),          ctrl.enhanceEmail);
 router.post  ('/send',            requireCredits('EMAIL_SEND'),         ctrl.sendEmail);
 router.post  ('/bulk',            ctrl.bulkSend);              // credits checked inside

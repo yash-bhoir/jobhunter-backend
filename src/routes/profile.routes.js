@@ -11,6 +11,8 @@ router.get   ('/',                ctrl.getProfile);
 router.patch ('/',                ctrl.updateProfile);
 router.patch ('/password',        ctrl.changePassword);
 router.post  ('/resume',          upload.single('resume'),     ctrl.uploadResume);
+router.patch ('/resumes/:id',     ctrl.patchResumeItem);
+router.delete('/resumes/:id',    ctrl.deleteResumeItem);
 router.post  ('/resume/docx',     uploadDocx.single('resume'), ctrl.uploadResumeDocx);
 router.delete('/resume',          ctrl.deleteResume);
 router.get   ('/resume/debug',    ctrl.debugResume);

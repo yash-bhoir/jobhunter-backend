@@ -9,15 +9,37 @@ const getCache  = () => { if (!_cache) { try { _cache = require('../../config/re
 const cacheGet  = async (k) => { try { return await getCache()?.get(k); } catch { return null; } };
 const cacheSet  = async (k, v, ttl) => { try { await getCache()?.set(k, v, ttl); } catch {} };
 
+// Tone / structure hints so parallel generations for the same job are not clones
+const TONE_HINTS = [
+  'Lead with one concrete metric or outcome tied to the role, then connect skills.',
+  'Open by referencing the company mission or product area (one short phrase), then your fit.',
+  'Start with a crisp problem–solution framing: a challenge teams in this role face, then how you address it.',
+];
+
 // ── Generate outreach email ───────────────────────────────────────
-// Cache key: MD5(company + jobTitle + candidateName + skills[:3] + jd[:200])
-// TTL: 3 days — same job+candidate combo → identical email. Saves ~500 tokens per hit.
-const generateOutreachEmail = async ({ recruiterName, company, jobTitle, jobUrl, jobDescription, candidate }) => {
-  const jdSnippet  = (jobDescription || '').slice(0, 200);
-  const cacheInput = `${company}||${jobTitle}||${candidate.name}||${(candidate.skills || []).slice(0, 3).join(',')}||${jdSnippet}`;
-  const ck         = `ai:email2:${crypto.createHash('md5').update(cacheInput).digest('hex')}`;
-  const cached     = await cacheGet(ck);
-  if (cached) return { ...cached, tokensUsed: 0, fromCache: true };
+// Cache key INCLUDES recipient email + variation so each HR contact gets distinct copy.
+// skipCache: true for "Regenerate" / when uniqueness is required regardless of cache.
+const generateOutreachEmail = async ({
+  recruiterName,
+  company,
+  jobTitle,
+  jobUrl,
+  jobDescription,
+  candidate,
+  recipientEmail,
+  recipientName,
+  skipCache = false,
+  variationIndex = 0,
+}) => {
+  const jdSnippet = (jobDescription || '').slice(0, 200);
+  const recNorm   = (recipientEmail || '').toLowerCase().trim() || 'generic';
+  const recName   = (recipientName || recruiterName || '').trim() || '';
+  const cacheInput = `${company}||${jobTitle}||${candidate.name}||${(candidate.skills || []).slice(0, 3).join(',')}||${jdSnippet}||${recNorm}||v${variationIndex % 3}`;
+  const ck         = `ai:email3:${crypto.createHash('md5').update(cacheInput).digest('hex')}`;
+  if (!skipCache) {
+    const cached = await cacheGet(ck);
+    if (cached) return { ...cached, tokensUsed: 0, fromCache: true };
+  }
 
   // Build signature block
   const contactParts = [];
@@ -28,9 +50,11 @@ const generateOutreachEmail = async ({ recruiterName, company, jobTitle, jobUrl,
 
   if (!process.env.OPENAI_API_KEY) {
     const skills4 = (candidate.skills || []).slice(0, 4).join(', ');
+    const greet = recName || recruiterName || 'Hiring Manager';
+    const uniq = recipientEmail ? ` (re: ${recipientEmail.split('@')[0]})` : '';
     return {
-      subject: `${jobTitle} — ${candidate.name}`,
-      body: `Dear ${recruiterName || 'Hiring Manager'},\n\nI came across the ${jobTitle} role at ${company} and believe my ${candidate.experience}+ years as a ${candidate.currentRole}, with expertise in ${skills4}, align closely with what you're looking for.\n\nI'd welcome a quick 15-minute call to explore how I can contribute to ${company}'s goals.\n\n${signature}`,
+      subject: `${jobTitle} — ${candidate.name}${uniq}`,
+      body: `Dear ${greet},\n\nI came across the ${jobTitle} role at ${company} and believe my ${candidate.experience}+ years as a ${candidate.currentRole}, with expertise in ${skills4}, align closely with what you're looking for.\n\nI'd welcome a quick 15-minute call to explore how I can contribute to ${company}'s goals.\n\n${signature}`,
       tokensUsed: 0,
     };
   }
@@ -56,21 +80,27 @@ ${candidate.linkedinUrl ? `- LinkedIn: ${candidate.linkedinUrl}` : ''}
 TARGET OPPORTUNITY:
 - Role: ${jobTitle}
 - Company: ${company}
-- Recruiter/Hiring Manager: ${recruiterName || 'Hiring Manager'}
+- Recruiter/Hiring Manager (if known): ${recruiterName || 'Hiring Manager'}
+${recipientEmail ? `- Recipient email (must be treated as a UNIQUE addressee; personalize subtly — do NOT mass-mail wording): ${recipientEmail}` : ''}
+${recName ? `- Recipient display name (use in greeting if natural): ${recName}` : ''}
 ${jobUrl ? `- Job Link: ${jobUrl}` : ''}${jdContext}
 
 EXACT SIGNATURE (place at the very end, no changes):
 ${signature}
 
+STRUCTURE / TONE SEED (follow closely — varies per recipient so emails are not duplicates):
+${TONE_HINTS[variationIndex % TONE_HINTS.length]}
+
 WRITING INSTRUCTIONS:
-1. Subject line: specific and compelling — mention role + a brief value hook (e.g. "5-yr React dev — ${jobTitle} at ${company}")
-2. Opening: strong hook — NOT "I am writing to express my interest". Instead, lead with a specific value statement or relevant achievement.
-3. Body (2 short paragraphs):
-   - Para 1: Connect 2-3 of the candidate's strongest skills directly to the role's requirements (use the JD if provided)
-   - Para 2: Express genuine interest in the specific company/team and propose a low-friction next step (15-min call)
-4. Length: 150–200 words total (professional but not verbose)
-5. Tone: confident, warm, direct — NOT grovelling or generic
-6. End with the exact signature above — no extra placeholders or closing lines
+1. Greeting: use "${recName || recruiterName || 'Hiring Manager'}" when appropriate; if only email is known, use "Hello," or "Hi there," — never a wrong name.
+2. Subject line: MUST differ from any generic "${jobTitle} application" — include a distinct hook (skill + outcome) tailored to this thread.
+3. Opening: strong hook — NOT "I am writing to express my interest". Vary sentence order vs. a template.
+4. Body (2 short paragraphs):
+   - Para 1: Connect 2-3 skills to the JD; mention the role title once in a fresh way
+   - Para 2: Company-specific interest + low-friction CTA (15-min call)
+5. Length: 150–200 words — professional, not spammy; avoid repeating the same adjectives you'd use for another recipient at the same company.
+6. If recipient email suggests a real name (e.g. jane.doe@), you may lightly personalize — do not fabricate biographical facts.
+7. End with the exact signature above — no extra placeholders
 
 Return ONLY valid JSON (no markdown, no code fences):
 {"subject": "...", "body": "..."}`;
@@ -85,7 +115,7 @@ Return ONLY valid JSON (no markdown, no code fences):
       { role: 'user', content: prompt },
     ],
     max_tokens:  600,
-    temperature: 0.65,
+    temperature: recipientEmail ? 0.82 : 0.65,
   });
 
   const raw = response.choices[0].message.content
@@ -112,7 +142,7 @@ Return ONLY valid JSON (no markdown, no code fences):
     tokensUsed: response.usage?.total_tokens || 0,
   };
 
-  await cacheSet(ck, result, 3 * 24 * 3600);
+  if (!skipCache) await cacheSet(ck, result, 3 * 24 * 3600);
   return result;
 };
 

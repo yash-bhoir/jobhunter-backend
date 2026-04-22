@@ -40,8 +40,10 @@ exports.updateProfile = async (req, res, next) => {
     const user   = await User.findById(req.user._id);
     const merged = { ...user.profile?.toObject?.() || {}, ...req.body };
 
-    // Check if resume exists for completion calc
-    const hasResume = !!user.resume?.url;
+    const hasResume = !!(
+      user.resume?.url
+      || (user.resumeItems || []).some((r) => r.url || (r.pdfBuffer && r.pdfBuffer.length))
+    );
     updates['profile.completionPct'] = calcCompletion({ ...merged, _hasResume: hasResume });
 
     const updated = await User.findByIdAndUpdate(
@@ -89,51 +91,205 @@ exports.changePassword = async (req, res, next) => {
   }
 };
 
-// ── Upload resume ─────────────────────────────────────────────────
+function buildResumePayloadFromFile(reqFile, cloud) {
+  const resumeData = {
+    originalName: reqFile.originalname,
+    uploadedAt:   new Date(),
+    isParsed:     false,
+  };
+  if (process.env.CLOUDINARY_CLOUD_NAME) {
+    resumeData.url      = cloud.secure_url;
+    resumeData.publicId = cloud.public_id;
+  } else {
+    resumeData.url = `local_${reqFile.originalname}`;
+    logger.warn('Cloudinary not configured — resume not stored in cloud (dev only)');
+  }
+  return resumeData;
+}
+
+async function syncPrimaryResumeFields(userId) {
+  const fresh = await User.findById(userId).select('+resumeItems.pdfBuffer +resumeBuffer resumeItems resume');
+  const def = (fresh.resumeItems || []).find((r) => r.isDefault) || (fresh.resumeItems || [])[0];
+  if (!def) {
+    await User.findByIdAndUpdate(userId, { $unset: { resume: '', resumeBuffer: '' } });
+    return;
+  }
+  await User.findByIdAndUpdate(userId, {
+    $set: {
+      resume: {
+        url:          def.url,
+        publicId:     def.publicId,
+        originalName: def.originalName,
+        uploadedAt:   def.uploadedAt,
+        isParsed:     def.isParsed,
+        extractedSkills:    def.extractedSkills || [],
+        extractedCompanies: def.extractedCompanies || [],
+        summary:            def.summary,
+        totalExperience:    def.totalExperience,
+        parsedAt:           def.parsedAt,
+      },
+      resumeBuffer: def.pdfBuffer,
+    },
+  });
+}
+
+// ── Upload resume (library: max 3; mode=add | replace_default; replaceResumeId targets one slot) ──
 exports.uploadResume = async (req, res, next) => {
   try {
     if (!req.file) throw new ValidationError('No file uploaded');
 
-    let resumeData = {
-      originalName: req.file.originalname,
-      uploadedAt:   new Date(),
-      isParsed:     false,
-    };
-
+    let cloud = null;
     if (process.env.CLOUDINARY_CLOUD_NAME) {
       const { uploadResume } = require('../config/cloudinary');
-      const result      = await uploadResume(req.file.buffer, req.user._id);
-      resumeData.url      = result.secure_url;
-      resumeData.publicId = result.public_id;
-    } else {
-      resumeData.url = `local_${req.file.originalname}`;
-      logger.warn('Cloudinary not configured — resume not stored in cloud (dev only)');
+      cloud = await uploadResume(req.file.buffer, req.user._id);
     }
 
-    // resumeBuffer stored separately (top-level) so it can be selected independently
+    const resumeData = buildResumePayloadFromFile(req.file, cloud || {});
 
-    // Update user resume + recalculate completion
-    const user = await User.findById(req.user._id);
+    const user = await User.findById(req.user._id).select('+resumeItems.pdfBuffer +resumeBuffer resumeItems resume');
+    user.resumeItems = user.resumeItems || [];
+    if (!user.resumeItems.length && user.resume?.url) {
+      user.resumeItems.push({
+        name:                 user.resume.originalName,
+        originalName:         user.resume.originalName,
+        url:                  user.resume.url,
+        publicId:             user.resume.publicId,
+        uploadedAt:           user.resume.uploadedAt || new Date(),
+        isDefault:            true,
+        isParsed:             user.resume.isParsed,
+        extractedSkills:      user.resume.extractedSkills || [],
+        extractedCompanies:   user.resume.extractedCompanies || [],
+        summary:              user.resume.summary,
+        totalExperience:      user.resume.totalExperience,
+        parsedAt:             user.resume.parsedAt,
+        pdfBuffer:            user.resumeBuffer,
+      });
+    }
+
+    const mode            = (req.body.mode || 'replace_default').toLowerCase();
+    const replaceResumeId = req.body.replaceResumeId;
+    const displayName     = (req.body.name || req.file.originalname || '').trim();
+
+    const newItem = {
+      name:                 displayName,
+      originalName:         resumeData.originalName,
+      url:                  resumeData.url,
+      publicId:             resumeData.publicId,
+      uploadedAt:           resumeData.uploadedAt,
+      isParsed:             false,
+      extractedSkills:      [],
+      extractedCompanies:   [],
+      pdfBuffer:            req.file.buffer,
+      isDefault:            !(user.resumeItems || []).length,
+    };
+
+    if (replaceResumeId) {
+      const item = user.resumeItems.id(replaceResumeId);
+      if (!item) throw new ValidationError('Resume slot not found');
+      item.originalName = newItem.originalName;
+      item.url          = newItem.url;
+      item.publicId     = newItem.publicId;
+      item.uploadedAt   = newItem.uploadedAt;
+      item.name         = displayName || newItem.originalName;
+      item.isParsed      = false;
+      item.pdfBuffer = req.file.buffer;
+    } else if (mode === 'add') {
+      if ((user.resumeItems || []).length >= 3) {
+        throw new ValidationError('Maximum 3 resumes. Delete one in Profile or replace an existing file.');
+      }
+      if (req.body.setDefault === 'true' || req.body.setDefault === true) {
+        (user.resumeItems || []).forEach((r) => { r.isDefault = false; });
+        newItem.isDefault = true;
+      }
+      user.resumeItems.push(newItem);
+    } else {
+      let defIdx = (user.resumeItems || []).findIndex((r) => r.isDefault);
+      if (defIdx < 0) defIdx = 0;
+      if ((user.resumeItems || []).length === 0) {
+        user.resumeItems.push({ ...newItem, isDefault: true });
+      } else {
+        const slot = user.resumeItems[defIdx];
+        slot.originalName = newItem.originalName;
+        slot.url          = newItem.url;
+        slot.publicId     = newItem.publicId;
+        slot.uploadedAt   = newItem.uploadedAt;
+        slot.name         = displayName || newItem.originalName;
+        slot.isParsed     = false;
+        slot.pdfBuffer = req.file.buffer;
+      }
+    }
+
     const merged = { ...user.profile?.toObject?.() || {}, _hasResume: true };
-    const completionPct = calcCompletion(merged);
-
-    await User.findByIdAndUpdate(req.user._id, {
-      $set: {
-        resume:                resumeData,
-        resumeBuffer:          req.file.buffer,
-        'profile.completionPct': completionPct,
-      },
-    });
+    user.profile.completionPct = calcCompletion(merged);
+    await user.save();
+    await syncPrimaryResumeFields(req.user._id);
+    invalidateUserCache(req.user._id);
 
     logger.info(`Resume uploaded: ${req.user.email}`);
     return success(res, {
       originalName: resumeData.originalName,
       url:          resumeData.url,
       uploadedAt:   resumeData.uploadedAt,
+      resumes:      user.toSafeObject().resumes,
     }, 'Resume uploaded successfully');
   } catch (err) {
     next(err);
   }
+};
+
+// ── Patch resume slot (rename / set default) ──────────────────────
+exports.patchResumeItem = async (req, res, next) => {
+  try {
+    const { name, isDefault } = req.body;
+    const user = await User.findById(req.user._id).select('resumeItems profile');
+    const item = user.resumeItems.id(req.params.id);
+    if (!item) throw new NotFoundError('Resume not found');
+    if (name !== undefined) item.name = String(name).trim() || item.originalName;
+    if (isDefault === true || isDefault === 'true') {
+      user.resumeItems.forEach((r) => { r.isDefault = false; });
+      item.isDefault = true;
+    }
+    const merged = { ...user.profile?.toObject?.() || {}, _hasResume: true };
+    user.profile.completionPct = calcCompletion(merged);
+    await user.save();
+    await syncPrimaryResumeFields(req.user._id);
+    invalidateUserCache(req.user._id);
+    return success(res, user.toSafeObject().resumes, 'Resume updated');
+  } catch (err) { next(err); }
+};
+
+// ── Delete one resume slot ────────────────────────────────────────
+exports.deleteResumeItem = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('+resumeItems.pdfBuffer resumeItems resume profile');
+    const item = user.resumeItems.id(req.params.id);
+    if (!item) throw new NotFoundError('Resume not found');
+    if (user.resumeItems.length === 1) {
+      if (item.publicId && process.env.CLOUDINARY_CLOUD_NAME) {
+        const { deleteFile } = require('../config/cloudinary');
+        await deleteFile(item.publicId).catch(() => {});
+      }
+      user.resumeItems = [];
+      user.resume = undefined;
+      user.resumeBuffer = undefined;
+    } else {
+      const wasDefault = item.isDefault;
+      if (item.publicId && process.env.CLOUDINARY_CLOUD_NAME) {
+        const { deleteFile } = require('../config/cloudinary');
+        await deleteFile(item.publicId).catch(() => {});
+      }
+      user.resumeItems.pull(req.params.id);
+      if (wasDefault && user.resumeItems.length) {
+        user.resumeItems[0].isDefault = true;
+      }
+    }
+    const merged = { ...user.profile?.toObject?.() || {}, _hasResume: !!(user.resumeItems?.length) };
+    user.profile.completionPct = calcCompletion(merged);
+    await user.save();
+    await syncPrimaryResumeFields(req.user._id);
+    invalidateUserCache(req.user._id);
+    return success(res, user.toSafeObject().resumes, 'Resume removed');
+  } catch (err) { next(err); }
 };
 
 // ── Upload DOCX resume (for keyword-exact patching) ──────────────
@@ -159,27 +315,32 @@ exports.uploadResumeDocx = async (req, res, next) => {
   }
 };
 
-// ── Delete resume ─────────────────────────────────────────────────
+// ── Delete resume (clears entire library + legacy fields) ─────────
 exports.deleteResume = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findById(req.user._id).select('resume resumeItems profile');
     if (!user) throw new NotFoundError('User not found');
 
+    const { deleteFile } = require('../config/cloudinary');
+    for (const item of user.resumeItems || []) {
+      if (item.publicId && process.env.CLOUDINARY_CLOUD_NAME) {
+        await deleteFile(item.publicId).catch(() => {});
+      }
+    }
     if (user.resume?.publicId && process.env.CLOUDINARY_CLOUD_NAME) {
-      const { deleteFile } = require('../config/cloudinary');
       await deleteFile(user.resume.publicId).catch(() => {});
     }
 
-    // Recalculate completion without resume
     const merged = { ...user.profile?.toObject?.() || {}, _hasResume: false };
     const completionPct = calcCompletion(merged);
 
     await User.findByIdAndUpdate(req.user._id, {
-      $unset: { resume: '' },
-      $set:   { 'profile.completionPct': completionPct },
+      $set:   { resumeItems: [], 'profile.completionPct': completionPct },
+      $unset: { resume: '', resumeBuffer: '' },
     });
 
-    return success(res, null, 'Resume deleted');
+    invalidateUserCache(req.user._id);
+    return success(res, null, 'All resumes deleted');
   } catch (err) {
     next(err);
   }
