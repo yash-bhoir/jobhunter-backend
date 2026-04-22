@@ -7,5 +7,6 @@ router.get('/users',     ctrl.getUserStats);
 router.get('/revenue',   ctrl.getRevenue);
 router.get('/searches',  ctrl.getSearchStats);
 router.get('/platforms', ctrl.getPlatformStats);
+router.get('/ranking-events', ctrl.getRankingEventStats);
 
 module.exports = router;

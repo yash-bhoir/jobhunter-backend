@@ -47,6 +47,10 @@ const globalJobSchema = new mongoose.Schema({
   // ── Geo ──────────────────────────────────────────────────────────
   geoLocation: { lat: Number, lng: Number },
 
+  // ── Semantic dedupe (OpenAI text-embedding-3-small @ reduced dims) ─
+  titleEmbedding: { type: [Number], default: undefined },
+  embeddingModel: { type: String, default: '' },
+
 }, { timestamps: true });
 
 // ── Indexes ───────────────────────────────────────────────────────

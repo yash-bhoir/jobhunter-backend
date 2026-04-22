@@ -2,6 +2,10 @@ const logger         = require('../../config/logger');
 const { score }       = require('./scorer');
 const { deduplicate } = require('./deduplicator');
 const { normalize }   = require('./normalizer');
+const { computeContentFingerprint } = require('./jobFingerprint.util');
+
+/** Max jobs to score & persist per run (quality pool; keeps CPU bounded). */
+const RANK_CAP = 280;
 const {
   findOrCreateCompany,
   ingestJob,
@@ -50,9 +54,12 @@ const PLATFORM_META = {
   themuse:        { type: 'free', defaultEnabled: true  },
   careerjet:      { type: 'free', defaultEnabled: true  },
   'linkedin-rss': { type: 'free', defaultEnabled: true  },
-  'indeed-rss':   { type: 'free', defaultEnabled: true  },
-  naukri:         { type: 'free', defaultEnabled: true  },
-  wellfound:      { type: 'free', defaultEnabled: true  },
+  // Indeed RSS is usually blocked (Cloudflare) from servers; admin can re-enable if using a proxy.
+  'indeed-rss':   { type: 'free', defaultEnabled: false },
+  // Naukri job API returns 406 "recaptcha required" without a real browser session.
+  naukri:         { type: 'free', defaultEnabled: false },
+  // Wellfound is behind DataDome; server-side fetch rarely succeeds.
+  wellfound:      { type: 'free', defaultEnabled: false },
   // ── New aggregators ──────────────────────────────────────────────
   jooble:         { type: 'paid', defaultEnabled: true  }, // JOOBLE_API_KEY set
   findwork:       { type: 'paid', defaultEnabled: true  }, // FINDWORK_API_KEY set
@@ -165,8 +172,6 @@ const _ingestIntoGlobalStore = async (jobs) => {
 
 // ── Main orchestrator ─────────────────────────────────────────────
 const runJobSearch = async (params, user, plan, onProgress) => {
-  const maxJobs = plan === 'free' ? 10 : plan === 'pro' ? 30 : 50;
-
   // Which platforms to use:
   // If user passed specific platforms → filter to only enabled ones from that list
   // Otherwise → all admin-enabled platforms
@@ -230,9 +235,19 @@ const runJobSearch = async (params, user, plan, onProgress) => {
   // Flatten, normalize, deduplicate, score
   const allRaw     = results.flatMap(r => r.status === 'fulfilled' ? r.value.jobs : []);
   const normalized = allRaw.map(normalize).filter(j => j.title && j.company);
-  const unique     = deduplicate(normalized);
-  const scored     = score(unique, user);
+  const unique = deduplicate(normalized);
+  const searchCtx = {
+    searchRole:     params.role,
+    searchLocation: params.location,
+    searchWorkType: params.workType,
+  };
+  const scored = score(unique, user, searchCtx);
   scored.sort((a, b) => b.matchScore - a.matchScore);
+
+  const rankedAll = scored.slice(0, RANK_CAP).map((j) => ({
+    ...j,
+    contentFingerprint: computeContentFingerprint(j),
+  }));
 
   // Platform breakdown
   const platformBreakdown = {};
@@ -243,8 +258,11 @@ const runJobSearch = async (params, user, plan, onProgress) => {
   });
 
   return {
-    jobs:              scored.slice(0, maxJobs),
-    totalFound:        scored.length,
+    /** Full ranked pool (capped) for persistence + “show all”; fingerprints attached */
+    rankedAll,
+    /** @deprecated Use rankedAll + display slicing in controller */
+    jobs:       rankedAll,
+    totalFound: scored.length,
     platformBreakdown,
     errors: results
       .filter(r => r.status === 'fulfilled' && r.value.error)

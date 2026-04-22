@@ -1,4 +1,5 @@
-const Job  = require('../models/Job');
+const Job             = require('../models/Job');
+const { recordClientEventForJob } = require('../services/ranking/rankingEvent.service');
 const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
 const { getCompanyContext } = require('../services/companyStore.service');
@@ -583,4 +584,30 @@ exports.getInsights = async (req, res, next) => {
       recommendations,
     });
   } catch (err) { next(err); }
+};
+
+// ── Ranking / feedback events (for future LTR + analytics) ───────
+exports.logRankingEvent = async (req, res, next) => {
+  try {
+    const job = await Job.findOne({
+      _id:    req.params.id,
+      userId: req.user._id,
+    }).select('_id searchId contentFingerprint matchScore source').lean();
+
+    if (!job) throw new NotFoundError('Job not found');
+
+    const type = String(req.body?.type || '').trim();
+    const meta = req.body?.meta && typeof req.body.meta === 'object' ? req.body.meta : {};
+
+    await recordClientEventForJob({
+      userId: req.user._id,
+      job,
+      type,
+      meta,
+    });
+
+    return success(res, { logged: true }, 'Event recorded');
+  } catch (err) {
+    next(err);
+  }
 };

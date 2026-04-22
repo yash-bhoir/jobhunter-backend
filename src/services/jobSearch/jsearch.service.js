@@ -22,7 +22,7 @@ const search = async ({ role, location, workType, skills = [] }) => {
       'X-RapidAPI-Key':  process.env.RAPIDAPI_KEY,
       'X-RapidAPI-Host': 'jsearch.p.rapidapi.com',
     },
-    timeout: 10000,
+    timeout: 20000,
   });
 
   return (data?.data || []).map(j => ({

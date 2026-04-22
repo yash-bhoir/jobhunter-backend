@@ -58,4 +58,22 @@ const generalLimiter = rateLimit(makeOptions(
   { message: 'Too many requests. Slow down.' }
 ));
 
-module.exports = { authLimiter, searchLimiter, emailLimiter, generalLimiter };
+// ── Ranking UX events — per-user, generous but stops spam / loops ─
+const rankingEventLimiter = rateLimit({
+  windowMs:        60 * 1000,
+  max:             180,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, message: 'Too many ranking events. Slow down.', code: 'RATE_LIMIT' },
+  skip:            () => process.env.NODE_ENV === 'test',
+  store:           makeStore(),
+  keyGenerator:    (req) => (req.user?._id ? `rank:${req.user._id}` : `rank:${req.ip}`),
+});
+
+module.exports = {
+  authLimiter,
+  searchLimiter,
+  emailLimiter,
+  generalLimiter,
+  rankingEventLimiter,
+};

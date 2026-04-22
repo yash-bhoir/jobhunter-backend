@@ -3,6 +3,17 @@ const JobSearch          = require('../models/JobSearch');
 const Job                = require('../models/Job');
 const UserCredits        = require('../models/UserCredits');
 const { runJobSearch }   = require('../services/jobSearch');
+const {
+  getSeenFingerprints,
+  filterUnseen,
+  mmrSelect,
+}                        = require('../services/jobSearch/searchSession.service');
+const { computeContentFingerprint } = require('../services/jobSearch/jobFingerprint.util');
+const {
+  upsertClusterFromFetch,
+  materializeClusterForUser,
+  findBestClusterForReuse,
+} = require('../services/jobSearch/searchCluster.service');
 const { findHRContacts } = require('../services/emailFinder');
 const { linkRecruitersToJobs } = require('../services/dataLinker.service');
 const {
@@ -15,6 +26,7 @@ const {
   findOrCreateCompany,
   ingestJob,
 }                        = require('../services/companyStore.service');
+const { recordSearchImpressions } = require('../services/ranking/rankingFeedback.service');
 const { emitToUser }     = require('../config/socket');
 const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
@@ -24,6 +36,11 @@ const logger = require('../config/logger');
 const SEARCH_CACHE_TTL_DAYS  = 30;
 const SEARCH_CACHE_TTL_HOURS = SEARCH_CACHE_TTL_DAYS * 24;
 
+/** Quality-first caps: small surface to user, larger ranked pool in DB for “show all”. */
+const DISPLAY_CAP = { free: 10, pro: 15, team: 15 };
+const PERSIST_CAP = { free: 80, pro: 150, team: 200 };
+const RANKING_MODEL_VERSION = 'rank-v2-2026-04';
+
 // ── Build a stable hash for a search query ────────────────────────
 function buildSearchHash(role, location, workType) {
   const str = [
@@ -32,6 +49,17 @@ function buildSearchHash(role, location, workType) {
     (workType || '').toLowerCase().trim(),
   ].join('|');
   return crypto.createHash('md5').update(str).digest('hex');
+}
+
+/** Client IP for third-party APIs that require it (e.g. CareerJet v4). */
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) {
+    const first = String(xff).split(',')[0].trim();
+    if (first) return first;
+  }
+  const raw = req.ip || req.socket?.remoteAddress || '';
+  return String(raw).replace(/^::ffff:/, '') || '127.0.0.1';
 }
 
 // ── Run search ────────────────────────────────────────────────────
@@ -118,25 +146,97 @@ exports.runSearch = async (req, res, next) => {
       });
     };
 
-    // Run job search (external APIs)
+    // ── Shared cluster reuse (cross-user) — exact hash or sibling role-family snapshot ──
+    let clusterReuse = false;
+    let clusterReuseMatch = '';
     let result;
-    try {
-      result = await runJobSearch(
-        { role, location, workType, platforms },
-        req.user, plan, onProgress
-      );
-    } catch (searchErr) {
-      // Mark search as failed
-      await JobSearch.findByIdAndUpdate(jobSearch._id, {
-        status: 'failed',
-        error:  searchErr.message,
-      });
-      // Credits will be auto-refunded by global error handler (5xx path)
-      throw searchErr;
+    if (!force) {
+      try {
+        const hit = await findBestClusterForReuse({
+          clusterHash: searchHash,
+          role,
+          location,
+          workType,
+        });
+        if (hit.cluster) {
+          const mat = materializeClusterForUser(hit.cluster, req.user, { role, location, workType });
+          if (mat?.rankedAll?.length) {
+            clusterReuse = true;
+            clusterReuseMatch = hit.reuseMatch || '';
+            result = { ...mat, fromCluster: true };
+            const refundAmt = req.creditsDeducted || 0;
+            if (refundAmt) {
+              await UserCredits.findOneAndUpdate(
+                { userId: req.user._id },
+                { $inc: { usedCredits: -refundAmt } },
+              ).catch((e) => logger.warn(`Cluster reuse credit refund failed: ${e.message}`));
+              req.creditsDeducted = 0;
+              if (req.creditsRemaining !== undefined) {
+                req.creditsRemaining += refundAmt;
+              }
+            }
+            emitToUser(req.user._id, 'search:progress', {
+              searchId: jobSearch._id,
+              platform: 'cluster',
+              found:    mat.rankedAll.length,
+              status:   hit.reuseMatch === 'sibling' ? 'reused_sibling_snapshot' : 'reused_snapshot',
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn(`[search] cluster reuse skipped: ${err.message}`);
+      }
     }
 
+    // Run job search (external APIs) — skipped when cluster snapshot hit
+    if (!result) {
+      try {
+        result = await runJobSearch(
+          {
+            role,
+            location,
+            workType,
+            platforms,
+            clientIp:         getClientIp(req),
+            clientUserAgent:  req.get('user-agent') || 'JobHunter/1.0',
+          },
+          req.user, plan, onProgress
+        );
+        if (result.rankedAll?.length) {
+          await upsertClusterFromFetch(searchHash, result, { role, location, workType }).catch((e) =>
+            logger.warn(`[search] SearchCluster upsert failed: ${e.message}`)
+          );
+        }
+      } catch (searchErr) {
+        await JobSearch.findByIdAndUpdate(jobSearch._id, {
+          status: 'failed',
+          error:  searchErr.message,
+        });
+        throw searchErr;
+      }
+    }
+
+    const ranked = result.rankedAll || result.jobs || [];
+    const seenFp = await getSeenFingerprints(req.user._id, searchHash);
+    const unseen   = filterUnseen(ranked, seenFp);
+    const pool     = unseen.length ? unseen : ranked;
+
+    const displayCap = DISPLAY_CAP[plan] || 12;
+    const persistCap = PERSIST_CAP[plan] || 100;
+
+    const poolSorted = [...pool].sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+    const persistJobs = poolSorted.slice(0, persistCap);
+
+    const mmrInput = poolSorted.slice(0, Math.min(80, poolSorted.length));
+    const displayJobs = mmrSelect(
+      mmrInput,
+      Math.min(displayCap, Math.max(1, mmrInput.length)),
+    );
+
+    const exhaustedNewMatches = ranked.length > 0 && unseen.length === 0;
+
     // Refund if search returned 0 jobs — APIs were reachable but no results
-    if ((!result.jobs || result.jobs.length === 0) && req.creditsDeducted) {
+    if (!persistJobs.length && req.creditsDeducted) {
       await UserCredits.findOneAndUpdate(
         { userId: req.user._id },
         { $inc: { usedCredits: -req.creditsDeducted } }
@@ -146,7 +246,7 @@ exports.runSearch = async (req, res, next) => {
 
     const durationMs = Date.now() - startTime;
 
-    const uniqueCompanyNames = [...new Set(result.jobs.map(j => j.company).filter(Boolean))];
+    const uniqueCompanyNames = [...new Set(persistJobs.map(j => j.company).filter(Boolean))];
 
     // ── Step 1 & 2: Global store ingest — fully non-blocking ─────
     // Runs in background after response is sent — never delays the user.
@@ -158,12 +258,12 @@ exports.runSearch = async (req, res, next) => {
         await Promise.all(
           uniqueCompanyNames.map(async (name) => {
             const company = await findOrCreateCompany(name, {
-              source: result.jobs.find(j => j.company === name)?.source,
+              source: persistJobs.find(j => j.company === name)?.source,
             });
             if (!company) return;
             companyIdMap[name] = company._id;
             // Ingest jobs for this company
-            const companyJobs = result.jobs.filter(j => j.company === name);
+            const companyJobs = persistJobs.filter(j => j.company === name);
             await Promise.all(companyJobs.map(async (j) => {
               const { globalJob } = await ingestJob(j, company._id);
               if (globalJob) {
@@ -256,8 +356,8 @@ exports.runSearch = async (req, res, next) => {
 
     // ── Save jobs to DB ───────────────────────────────────────────
     let savedJobIds = [];
-    if (result.jobs.length > 0) {
-      const jobDocs = result.jobs.map(j => {
+    if (persistJobs.length > 0) {
+      const jobDocs = persistJobs.map(j => {
         const hr         = emailMap[j.company] || null;
         const topContact = hr?.contacts?.[0]   || null;
         const globalKey  = j.url || j.externalId || `${j.company}|${j.title}`;
@@ -276,6 +376,7 @@ exports.runSearch = async (req, res, next) => {
           matchScore:           j.matchScore,
           postedAt:             j.postedAt,
           status:               'found',
+          contentFingerprint:   j.contentFingerprint || computeContentFingerprint(j),
           // ── Global store refs ─────────────────────────────────
           companyId:            companyIdMap[j.company]  || null,
           globalJobId:          globalJobIdMap[globalKey] || null,
@@ -302,6 +403,15 @@ exports.runSearch = async (req, res, next) => {
       savedJobIds = inserted?.insertedIds ? Object.values(inserted.insertedIds) : [];
     }
 
+    if (displayJobs.length) {
+      await recordSearchImpressions({
+        userId:      req.user._id,
+        searchId:    jobSearch._id,
+        clusterHash: searchHash,
+        displayJobs,
+      }).catch((e) => logger.warn(`[search] impressions: ${e.message}`));
+    }
+
     // ── Auto-link existing recruiter lookups to newly saved jobs ──
     // Runs async — doesn't block the response
     if (savedJobIds.length > 0) {
@@ -314,8 +424,12 @@ exports.runSearch = async (req, res, next) => {
     await JobSearch.findByIdAndUpdate(jobSearch._id, {
       status:            'completed',
       totalFound:        result.totalFound,
+      storedJobCount:    persistJobs.length,
+      rankingModel:      RANKING_MODEL_VERSION,
       platformBreakdown: result.platformBreakdown,
       durationMs,
+      fromClusterReuse:  clusterReuse,
+      clusterReuseMatch: clusterReuse ? clusterReuseMatch : '',
     });
 
     emitToUser(req.user._id, 'search:complete', {
@@ -326,21 +440,27 @@ exports.runSearch = async (req, res, next) => {
     });
 
     logger.info(
-      `Search complete: ${req.user.email} — ${result.totalFound} jobs, ` +
-      `${Object.keys(emailMap).length} HR emails in ${durationMs}ms`
+      `Search complete: ${req.user.email} — ${result.totalFound} ranked, ${persistJobs.length} stored, ` +
+      `${displayJobs.length} shown, ${Object.keys(emailMap).length} HR emails in ${durationMs}ms`
     );
 
     return success(res, {
       searchId:          jobSearch._id,
-      jobs:              result.jobs,
+      jobs:              displayJobs,
       totalFound:        result.totalFound,
+      storedJobCount:    persistJobs.length,
+      displayedCount:    displayJobs.length,
+      exhaustedNewMatches,
+      rankingModel:      RANKING_MODEL_VERSION,
       platformBreakdown: result.platformBreakdown,
       emailsFound:       Object.keys(emailMap).length,
       fromCache:         false,
+      fromCluster:       clusterReuse,
+      clusterReuseMatch: clusterReuse ? clusterReuseMatch : '',
       durationMs,
-      creditsUsed:       req.creditsDeducted  || 10,
+      creditsUsed:       typeof req.creditsDeducted === 'number' ? req.creditsDeducted : 0,
       creditsRemaining:  req.creditsRemaining,
-    }, 'Search complete');
+    }, clusterReuse ? 'Search complete (reused shared job pool)' : 'Search complete');
 
   } catch (err) {
     next(err);
@@ -388,11 +508,48 @@ exports.getSearchById = async (req, res, next) => {
 // ── Get jobs for a search ─────────────────────────────────────────
 exports.getSearchJobs = async (req, res, next) => {
   try {
-    const jobs = await Job.find({
-      searchId: req.params.id,
-      userId:   req.user._id,
-    }).sort({ matchScore: -1 }).lean();
-    return success(res, jobs);
+    const page  = Math.max(1, parseInt(req.query.page, 10)  || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const skip  = (page - 1) * limit;
+
+    const filter = { searchId: req.params.id, userId: req.user._id };
+    const status = req.query.status || null;
+    const source = req.query.source || null;
+    const remote = req.query.remote;
+    if (status) filter.status = status;
+    if (source) filter.source = source;
+    if (remote === 'true' || remote === 'false') filter.remote = remote === 'true';
+
+    const sortKey = String(req.query.sort || 'matchScore').trim();
+    const sortObj = sortKey === 'date'
+      ? { createdAt: -1 }
+      : { matchScore: -1 };
+
+    const [jobs, total, platformAgg] = await Promise.all([
+      Job.find(filter).sort(sortObj).skip(skip).limit(limit).lean(),
+      Job.countDocuments(filter),
+      page === 1
+        ? Job.aggregate([
+            { $match: filter },
+            { $group: { _id: '$source', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+          ]).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    const platformBreakdown = platformAgg
+      ? Object.fromEntries(platformAgg.map((p) => [p._id || 'Unknown', p.count]))
+      : undefined;
+
+    return paginated(res, jobs, {
+      total,
+      page,
+      limit,
+      pages:   Math.ceil(total / limit) || 1,
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+      ...(platformBreakdown ? { platformBreakdown } : {}),
+    });
   } catch (err) {
     next(err);
   }

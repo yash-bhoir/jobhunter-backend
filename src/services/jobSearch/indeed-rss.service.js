@@ -1,6 +1,7 @@
 /**
- * Indeed Jobs — public RSS feed (no auth required)
- * Falls back gracefully if Indeed blocks the RSS (returns HTML).
+ * Indeed Jobs — public RSS (no API key).
+ * Indeed serves RSS behind Cloudflare; server-side requests often get HTTP 403.
+ * We fail open (empty list) and log once per search.
  */
 const axios  = require('axios');
 const Parser = require('rss-parser');
@@ -8,7 +9,12 @@ const logger = require('../../config/logger');
 
 const parser = new Parser({
   timeout: 12000,
-  headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobHunter/1.0)' },
+  headers: {
+    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept':          'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer':         'https://www.indeed.com/',
+  },
   customFields: { item: ['description', 'pubDate', 'link', 'title'] },
 });
 
@@ -19,18 +25,29 @@ const search = async ({ role, location, workType }) => {
 
     const url = `https://www.indeed.com/rss?q=${encodeURIComponent(q)}&l=${encodeURIComponent(l)}&radius=25&limit=25&sort=date`;
 
-    // Fetch raw first so we can detect HTML responses (Indeed blocks RSS in some regions)
     const raw = await axios.get(url, {
       timeout: 12000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobHunter/1.0)' },
-      responseType: 'text',
+      headers: {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept':          'application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer':         'https://www.indeed.com/',
+      },
+      responseType:   'text',
+      validateStatus: () => true,
     });
+
+    if (raw.status !== 200) {
+      logger.warn(
+        `[indeed-rss] HTTP ${raw.status} — Indeed RSS is often blocked (Cloudflare) for server IPs; use JSearch, SerpAPI, or Reed for broader coverage`
+      );
+      return [];
+    }
 
     const body = typeof raw.data === 'string' ? raw.data : '';
 
-    // If Indeed returned an HTML page instead of XML, bail out gracefully
     if (body.trimStart().startsWith('<!DOCTYPE') || body.trimStart().startsWith('<html')) {
-      logger.warn('[indeed-rss] blocked — received HTML instead of RSS feed');
+      logger.warn('[indeed-rss] blocked — HTML challenge page instead of RSS');
       return [];
     }
 

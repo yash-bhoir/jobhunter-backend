@@ -7,6 +7,8 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "test": "jest --coverage",
+    "test:job-apis": "node src/scripts/testJobSearchApis.js",
+    "backfill:cluster-family": "node src/scripts/backfillSearchClusterFamilyFromJobSearch.js",
     "seed": "node ../scripts/seedAdmin.js"
   },
   "dependencies": {

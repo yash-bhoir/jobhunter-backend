@@ -82,18 +82,30 @@ const expandRole = (role) => {
   return [lower];
 };
 
-const score = (jobs, user) => {
+/**
+ * @param {object[]} jobs
+ * @param {object}   user  — hydrated user doc
+ * @param {object}   [searchCtx] — live search intent (overrides sparse profile)
+ * @param {string}   [searchCtx.searchRole]
+ * @param {string}   [searchCtx.searchLocation]
+ * @param {string}   [searchCtx.searchWorkType]
+ */
+const score = (jobs, user, searchCtx = {}) => {
   const rawSkills = [
     ...(user?.profile?.skills         || []),
     ...(user?.resume?.extractedSkills || []),
   ].map(s => s.toLowerCase().trim()).filter(s => s.length > 1);
 
-  const targetRole   = (user?.profile?.targetRole  || '').toLowerCase().trim();
-  const workType     = (user?.profile?.workType    || '').toLowerCase();
+  const targetRole = (
+    (searchCtx.searchRole || user?.profile?.targetRole || user?.profile?.currentRole || '')
+  ).toLowerCase().trim();
+  const workType = (
+    (searchCtx.searchWorkType || user?.profile?.workType || 'any')
+  ).toLowerCase();
   const companyType  = (user?.profile?.companyType || []).map(c => c.toLowerCase());
   const experience   = user?.profile?.experience   || 0;
   const userLocation = (
-    user?.profile?.preferredLocations?.[0] || user?.profile?.city || ''
+    (searchCtx.searchLocation || user?.profile?.preferredLocations?.[0] || user?.profile?.city || '')
   ).toLowerCase().trim();
 
   // Expand role words including synonyms
@@ -186,6 +198,14 @@ const score = (jobs, user) => {
     if      (description.length > 500) s += 5;
     else if (description.length > 150) s += 3;
     else if (description.length >  50) s += 1;
+
+    // Small boost when job title aligns with the *current search role* text (query intent)
+    const qRole = (searchCtx.searchRole || '').toLowerCase().trim();
+    if (qRole && qRole !== targetRole) {
+      const qWords = qRole.split(/\s+/).filter(w => w.length > 2);
+      const hits = qWords.filter(w => title.includes(w)).length;
+      if (hits > 0) s += Math.min(6, hits * 2);
+    }
 
     return { ...job, matchScore: Math.max(0, Math.min(Math.round(s), 99)) };
   }).filter(Boolean);

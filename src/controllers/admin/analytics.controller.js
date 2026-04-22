@@ -4,6 +4,7 @@ const ActivityLog = require('../../models/ActivityLog');
 const JobSearch   = require('../../models/JobSearch');
 const Job         = require('../../models/Job');
 const OutreachEmail = require('../../models/OutreachEmail');
+const JobRankingEvent = require('../../models/JobRankingEvent');
 const { success } = require('../../utils/response.util');
 
 // ── Overview ──────────────────────────────────────────────────────
@@ -127,6 +128,71 @@ exports.getPlatformStats = async (req, res, next) => {
     ]);
 
     return success(res, stats);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Ranking / UX feedback (JobRankingEvent) ───────────────────────
+/** Query: days (1–90, default 7), eventType (optional filter) */
+exports.getRankingEventStats = async (req, res, next) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 7));
+    const from   = new Date();
+    from.setDate(from.getDate() - days);
+    from.setHours(0, 0, 0, 0);
+
+    const match = { createdAt: { $gte: from } };
+    const et    = String(req.query.eventType || '').trim();
+    if (et) match.eventType = et;
+
+    const [byType, byDay, byListingSurface, total, uniqueUsers] = await Promise.all([
+      JobRankingEvent.aggregate([
+        { $match: match },
+        { $group: { _id: '$eventType', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      JobRankingEvent.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'UTC' } },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      JobRankingEvent.aggregate([
+        { $match: match },
+        {
+          $project: {
+            surface: {
+              $switch: {
+                branches: [
+                  { case: { $eq: [{ $type: '$linkedinJobId' }, 'objectId'] }, then: 'linkedin_job' },
+                  { case: { $eq: [{ $type: '$jobId' }, 'objectId'] }, then: 'job' },
+                ],
+                default: 'other',
+              },
+            },
+          },
+        },
+        { $group: { _id: '$surface', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      JobRankingEvent.countDocuments(match),
+      JobRankingEvent.distinct('userId', match).then((ids) => ids.length),
+    ]);
+
+    return success(res, {
+      days,
+      from:     from.toISOString(),
+      total,
+      uniqueUsers,
+      byEventType: Object.fromEntries(byType.map((r) => [r._id || 'unknown', r.count])),
+      byListingSurface: Object.fromEntries(byListingSurface.map((r) => [r._id || 'unknown', r.count])),
+      byDay:       byDay.map((r) => ({ date: r._id, count: r.count })),
+    });
   } catch (err) {
     next(err);
   }

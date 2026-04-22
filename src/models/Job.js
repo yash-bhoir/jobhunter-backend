@@ -17,6 +17,8 @@ const jobSchema = new mongoose.Schema({
   source:     String,
   remote:     { type: Boolean, default: false },
   matchScore: { type: Number, default: 0, min: 0, max: 100 },
+  /** Stable hash for dedupe + “next page” of same search across sessions */
+  contentFingerprint: { type: String, default: null, index: true },
   status:     {
     type:    String,
     enum:    ['found', 'saved', 'applied', 'interview', 'offer', 'rejected'],
@@ -107,6 +109,7 @@ jobSchema.index({ searchId: 1, recruiterEmail: 1 });
 // Added for recruiter history — jobs with emails
 jobSchema.index({ userId: 1, recruiterEmail: 1, createdAt: -1 });
 jobSchema.index({ userId: 1, company: 1 });
+jobSchema.index({ userId: 1, contentFingerprint: 1 });
 // TTL-friendly: mark expired jobs in maintenance
 jobSchema.index({ expired: 1, createdAt: 1 });
 

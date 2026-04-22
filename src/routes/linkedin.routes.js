@@ -3,6 +3,7 @@ const router  = express.Router();
 const ctrl    = require('../controllers/linkedin.controller');
 const { authenticate }   = require('../middleware/auth.middleware');
 const { requireCredits, planGuard } = require('../middleware/credits.middleware');
+const { rankingEventLimiter } = require('../middleware/rateLimit.middleware');
 
 // Public route — Google redirects here with no JWT (userId comes from state param)
 router.get ('/gmail/callback',  ctrl.gmailCallback);
@@ -10,6 +11,7 @@ router.get ('/gmail/callback',  ctrl.gmailCallback);
 router.use(authenticate);
 
 router.get ('/jobs',                      ctrl.getJobs);
+router.post('/jobs/:id/ranking-event',    rankingEventLimiter, ctrl.logLinkedInRankingEvent);
 router.post('/jobs',                      ctrl.addJob);
 router.post('/fetch',                     ctrl.fetchAlerts);
 router.get ('/jobs/:id',                  ctrl.getJob);

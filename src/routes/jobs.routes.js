@@ -3,6 +3,7 @@ const router  = express.Router();
 const ctrl    = require('../controllers/jobs.controller');
 const { authenticate }   = require('../middleware/auth.middleware');
 const { requireCredits, planGuard } = require('../middleware/credits.middleware');
+const { rankingEventLimiter } = require('../middleware/rateLimit.middleware');
 
 router.use(authenticate);
 
@@ -14,6 +15,7 @@ router.get   ('/insights',             ctrl.getInsights);
 router.get   ('/follow-ups',           ctrl.getFollowUps);
 
 router.get   ('/:id',          ctrl.getJob);
+router.post  ('/:id/ranking-event', rankingEventLimiter, ctrl.logRankingEvent);
 router.patch ('/:id/status',   ctrl.updateStatus);
 router.post  ('/:id/save',     ctrl.saveJob);
 router.post  ('/:id/unsave',   ctrl.unsaveJob);

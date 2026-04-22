@@ -25,6 +25,11 @@ const GlobalJob       = require('../models/GlobalJob');
 const GlobalRecruiter = require('../models/GlobalRecruiter');
 const GlobalEmployee  = require('../models/GlobalEmployee');
 const logger          = require('../config/logger');
+const {
+  embedJob,
+  cosineSimilarity,
+  EMBEDDING_MODEL_VERSION,
+} = require('./ai/jobEmbedding.service');
 
 // ── Staleness TTLs (in days) ──────────────────────────────────────
 const RECRUITER_TTL_DAYS = 30;
@@ -114,11 +119,60 @@ async function findOrCreateCompany(rawName, extras = {}) {
  *   1. externalId + companyId (strongest)
  *   2. url (fallback)
  *   3. title + companyId (weakest, last resort)
+ *   4. Semantic cosine match vs recent same-company jobs (OpenAI embedding)
  *
  * @param {object} rawJob  — normalized job object from any platform service
  * @param {ObjectId} companyId
- * @returns {{ globalJob, isNew }}
+ * @returns {{ globalJob, isNew, mergedSemantic?: boolean }}
  */
+async function trySemanticMergeGlobalJob(companyId, rawJob, embedding, sourceEntry) {
+  if (!embedding?.length) return null;
+
+  const threshold = parseFloat(process.env.GLOBAL_JOB_SEM_DEDUP_THRESHOLD || '0.88');
+  const limit     = parseInt(process.env.GLOBAL_JOB_SEM_DEDUP_MAX_NEIGHBORS || '40', 10) || 40;
+
+  const neighbors = await GlobalJob.find({
+    companyId,
+    'titleEmbedding.0': { $exists: true },
+  })
+    .sort({ lastSeenAt: -1 })
+    .limit(limit)
+    .select('titleEmbedding title url _id description')
+    .lean();
+
+  let best = null;
+  let bestScore = threshold;
+  for (const n of neighbors) {
+    if (!n.titleEmbedding?.length || n.titleEmbedding.length !== embedding.length) continue;
+    const s = cosineSimilarity(embedding, n.titleEmbedding);
+    if (s > bestScore) {
+      bestScore = s;
+      best = n;
+    }
+  }
+  if (!best) return null;
+
+  const longerDesc = String(rawJob.description || '').length > String(best.description || '').length;
+  const fillUrl      = rawJob.url && !best.url;
+
+  await GlobalJob.updateOne(
+    { _id: best._id },
+    {
+      $set: {
+        lastSeenAt: new Date(),
+        expired:      false,
+        ...(fillUrl ? { url: rawJob.url } : {}),
+        ...(longerDesc ? { description: rawJob.description } : {}),
+      },
+      $addToSet: { sources: sourceEntry },
+    },
+  );
+
+  const merged = await GlobalJob.findById(best._id).lean();
+  logger.info(`[companyStore] semantic merge GlobalJob ${best._id} (cos≈${bestScore.toFixed(3)})`);
+  return merged;
+}
+
 async function ingestJob(rawJob, companyId) {
   if (!companyId) return { globalJob: null, isNew: false };
 
@@ -156,8 +210,15 @@ async function ingestJob(rawJob, companyId) {
       return { globalJob: existing, isNew: false };
     }
 
+    // ── Semantic near-dup (cross-URL / syndicated listings) ─────
+    const embedding = await embedJob(rawJob);
+    if (embedding?.length) {
+      const merged = await trySemanticMergeGlobalJob(companyId, rawJob, embedding, sourceEntry);
+      if (merged) return { globalJob: merged, isNew: false, mergedSemantic: true };
+    }
+
     // Create new
-    const globalJob = await GlobalJob.create({
+    const createPayload = {
       companyId,
       externalId:    rawJob.externalId   || null,
       url:           rawJob.url          || null,
@@ -170,7 +231,13 @@ async function ingestJob(rawJob, companyId) {
       primarySource: rawJob.source,
       sources:       [sourceEntry],
       lastSeenAt:    new Date(),
-    });
+    };
+    if (embedding?.length) {
+      createPayload.titleEmbedding = embedding;
+      createPayload.embeddingModel = EMBEDDING_MODEL_VERSION;
+    }
+
+    const globalJob = await GlobalJob.create(createPayload);
 
     return { globalJob, isNew: true };
   } catch (err) {

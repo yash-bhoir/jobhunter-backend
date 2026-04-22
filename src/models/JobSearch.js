@@ -12,6 +12,13 @@ const jobSearchSchema = new mongoose.Schema({
   },
   status:            { type: String, enum: ['running', 'completed', 'failed'], default: 'running' },
   totalFound:        { type: Number, default: 0 },
+  /** Jobs persisted for this search run (for “show all” / analytics) */
+  storedJobCount:    { type: Number, default: 0 },
+  rankingModel:      { type: String, default: '' },
+  /** True when results came from shared SearchCluster snapshot (no external API run). */
+  fromClusterReuse:  { type: Boolean, default: false },
+  /** When fromClusterReuse: 'exact' (same query hash) or 'sibling' (role-family filtered snapshot). */
+  clusterReuseMatch: { type: String, default: '' },
   platformBreakdown: { type: Map, of: Number },
   durationMs:        Number,
   error:             String,

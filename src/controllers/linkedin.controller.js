@@ -6,6 +6,7 @@ const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
 const logger                 = require('../config/logger');
 const { encrypt, decrypt }   = require('../utils/crypto.util');
+const { recordClientEventForLinkedInJob } = require('../services/ranking/rankingEvent.service');
 
 // ── Get email-sourced jobs only ───────────────────────────────────
 exports.getEmailJobs = async (req, res, next) => {
@@ -472,42 +473,48 @@ exports.fetchFromGmail = async (req, res, next) => {
     const { accessToken: rawAccessToken, refreshToken: rawRefreshToken } = user.decryptGmailTokens();
 
     // Setup OAuth client with stored tokens.
-    // IMPORTANT: pass expiry_date so the library knows when to auto-refresh.
-    // Without it, getAccessToken() assumes the token is still valid and returns
-    // the stale (expired) access_token instead of using the refresh_token.
-    // Default to 1 (1 ms past epoch) so an unknown expiry always triggers a refresh.
+    // Pass expiry_date only when we have it — this lets the library auto-refresh
+    // when the token is known to be expired. Without it, the library assumes the
+    // token is still valid and returns the stale access_token without refreshing.
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
     );
-    oauth2Client.setCredentials({
+    const credentials = {
       access_token:  rawAccessToken,
       refresh_token: rawRefreshToken,
-      expiry_date:   user.gmailTokenExpiry || 1,
-    });
+    };
+    if (user.gmailTokenExpiry) credentials.expiry_date = user.gmailTokenExpiry;
+    oauth2Client.setCredentials(credentials);
 
-    // Get fresh access token (auto-refreshes if expiry_date is in the past)
+    // Get fresh access token (auto-refreshes when expiry_date is set and in the past)
     let accessToken;
     try {
-      const { token, res: tokenRes } = await oauth2Client.getAccessToken();
-      accessToken = token || rawAccessToken;
+      const tokenResponse = await oauth2Client.getAccessToken();
+      // getAccessToken() returns { token, res } in google-auth-library v6+
+      // and a plain string in older versions — handle both.
+      const freshToken = typeof tokenResponse === 'string'
+        ? tokenResponse
+        : tokenResponse?.token;
+      accessToken = freshToken || rawAccessToken;
 
       // Persist new access_token + expiry_date if they changed
-      if (token && token !== rawAccessToken) {
-        const newExpiry = tokenRes?.data?.expiry_date || (Date.now() + 3600 * 1000);
+      if (freshToken && freshToken !== rawAccessToken) {
+        const newExpiry = tokenResponse?.res?.data?.expiry_date || (Date.now() + 3600 * 1000);
         await User.findByIdAndUpdate(req.user._id, {
-          gmailAccessToken: encrypt(token),
+          gmailAccessToken: encrypt(freshToken),
           gmailTokenExpiry: newExpiry,
         });
         logger.info(`Gmail access token refreshed for ${req.user._id}`);
       }
-    } catch (err) {
-      // Token revoked or refresh_token missing — clear stored tokens and ask user to reconnect
-      logger.warn(`Gmail token invalid for ${req.user._id}: ${err.message}`);
+    } catch (tokenErr) {
+      // Refresh token revoked or missing — clear tokens and ask user to reconnect.
+      // Use 400 (not 401) so the frontend JWT-refresh interceptor is not triggered.
+      logger.warn(`Gmail token refresh failed for ${req.user._id}: ${tokenErr.message}`);
       await User.findByIdAndUpdate(req.user._id, {
         $unset: { gmailAccessToken: '', gmailRefreshToken: '', gmailEmail: '', gmailConnectedAt: '', gmailTokenExpiry: '' },
       });
-      return res.status(401).json({
+      return res.status(400).json({
         success: false,
         message: 'Gmail session expired. Please reconnect your Gmail account.',
         code:    'GMAIL_TOKEN_EXPIRED',
@@ -654,7 +661,31 @@ exports.fetchFromGmail = async (req, res, next) => {
       lastFetchedAt:  new Date().toISOString(),
     }, `Fetched ${insertedCount} jobs from your email alerts!`);
 
-  } catch (err) { next(err); }
+  } catch (err) {
+    // GaxiosError from Gmail API with 401 = stale token reached the API.
+    // Return 400 (not 401) so the frontend JWT-refresh interceptor is not triggered.
+    const isGmailAuthError =
+      (err.status === 401 || err.response?.status === 401) &&
+      (err.message?.toLowerCase().includes('invalid credentials') ||
+       err.message?.toLowerCase().includes('invalid_grant') ||
+       err.message?.toLowerCase().includes('unauthorized') ||
+       err.message?.toLowerCase().includes('unauthenticated'));
+
+    if (isGmailAuthError) {
+      const User = require('../models/User');
+      logger.warn(`Gmail API auth error for ${req.user._id}: ${err.message}`);
+      await User.findByIdAndUpdate(req.user._id, {
+        $unset: { gmailAccessToken: '', gmailRefreshToken: '', gmailEmail: '', gmailConnectedAt: '', gmailTokenExpiry: '' },
+      }).catch(() => {});
+      return res.status(400).json({
+        success: false,
+        message: 'Gmail session expired. Please reconnect your Gmail account.',
+        code:    'GMAIL_TOKEN_EXPIRED',
+      });
+    }
+
+    next(err);
+  }
 };
 
 // ── Get alert settings ────────────────────────────────────────────
@@ -909,6 +940,32 @@ exports.fetchDescription = async (req, res, next) => {
   } catch (err) {
     logger.warn(`LinkedIn description fetch failed for ${req.params.id}: ${err.message}`);
     return success(res, { description: null }, 'Could not fetch description');
+  }
+};
+
+// ── Ranking / feedback (LinkedInJob listings) ────────────────────
+exports.logLinkedInRankingEvent = async (req, res, next) => {
+  try {
+    const li = await LinkedInJob.findOne({
+      _id:    req.params.id,
+      userId: req.user._id,
+    }).select('_id matchScore source').lean();
+
+    if (!li) throw new NotFoundError('Job not found');
+
+    const type = String(req.body?.type || '').trim();
+    const meta = req.body?.meta && typeof req.body.meta === 'object' ? req.body.meta : {};
+
+    await recordClientEventForLinkedInJob({
+      userId:       req.user._id,
+      linkedInJob:  li,
+      type,
+      meta,
+    });
+
+    return success(res, { logged: true }, 'Event recorded');
+  } catch (err) {
+    next(err);
   }
 };
 
