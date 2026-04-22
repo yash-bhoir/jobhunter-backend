@@ -3,6 +3,11 @@ const logger   = require('./logger');
 const { migrateResumeItemsPdfBuffer } = require('../migrations/migrateResumeItemsPdfBuffer');
 
 const connectDB = async () => {
+  if (!process.env.MONGODB_URI || String(process.env.MONGODB_URI).trim() === '') {
+    throw new Error(
+      'MONGODB_URI is missing. On Render: Web Service → Environment → add MONGODB_URI (MongoDB Atlas connection string).',
+    );
+  }
   const conn = await mongoose.connect(process.env.MONGODB_URI, {
     // Pool: 1 connection per expected concurrent request (scale with instance count)
     maxPoolSize:               100,
