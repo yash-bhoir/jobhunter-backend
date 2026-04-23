@@ -108,6 +108,9 @@ const userSchema = new mongoose.Schema({
   loginAttempts: { type: Number, default: 0 },
   lockUntil:     Date,
 
+  /** Bumped on logout / password change / refresh rotation — invalidates JWT refresh + access (see auth middleware). */
+  refreshSessionVersion: { type: Number, default: 0 },
+
   lastLoginAt:  Date,
   lastActiveAt: Date,
   banReason:    String,
@@ -149,6 +152,22 @@ const userSchema = new mongoose.Schema({
     frequency:  { type: String, enum: ['hourly', 'daily', 'weekly'], default: 'daily' },
     lastSentAt: Date,
   },
+
+  /**
+   * Watched career boards (must match `portals.js` — Greenhouse / Ashby / Lever only).
+   * Daily scan saves new listings as LinkedInJob `dream_company` and can email the user.
+   */
+  dreamCompanyWatches: {
+    type: [{
+      platform: { type: String, enum: ['greenhouse', 'ashby', 'lever'], required: true },
+      slug:     { type: String, required: true, trim: true },
+      name:     { type: String, required: true, trim: true },
+      addedAt:  { type: Date, default: Date.now },
+    }],
+    default: [],
+  },
+  /** Throttle dream-company digest emails (separate from linkedinAlerts.lastSentAt). */
+  dreamCompanyLastEmailAt: Date,
 
 }, { timestamps: true });
 
@@ -263,4 +282,28 @@ userSchema.virtual('fullName').get(function () {
   return `${this.profile?.firstName || ''} ${this.profile?.lastName || ''}`.trim();
 });
 
-module.exports = mongoose.model('User', userSchema);
+/**
+ * Include nested resume PDF buffers without selecting parent `resumeItems` — Mongoose 8 rejects
+ * `.select('+resumeItems.pdfBuffer resumeItems …')` with: Path collision at resumeItems.pdfBuffer …
+ */
+const RESUME_ITEMS_LEAF_PATHS = [
+  'resumeItems._id',
+  'resumeItems.name',
+  'resumeItems.originalName',
+  'resumeItems.url',
+  'resumeItems.publicId',
+  'resumeItems.uploadedAt',
+  'resumeItems.isDefault',
+  'resumeItems.isParsed',
+  'resumeItems.extractedSkills',
+  'resumeItems.extractedCompanies',
+  'resumeItems.summary',
+  'resumeItems.totalExperience',
+  'resumeItems.parsedAt',
+].join(' ');
+
+const RESUME_PDF_BUFFER_INCLUDE = `+resumeItems.pdfBuffer ${RESUME_ITEMS_LEAF_PATHS}`;
+
+const UserModel = mongoose.model('User', userSchema);
+UserModel.RESUME_PDF_BUFFER_INCLUDE = RESUME_PDF_BUFFER_INCLUDE;
+module.exports = UserModel;

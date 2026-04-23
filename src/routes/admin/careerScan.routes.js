@@ -1,7 +1,7 @@
 const express  = require('express');
 const router   = express.Router();
 const { GREENHOUSE, ASHBY, LEVER } = require('../../services/careerScanner/portals');
-const { runDailyCareerScan, getPortalJobs } = require('../../services/careerScanner/scheduler');
+const { runDailyCareerScan, runDreamCompanyScan, getPortalJobs } = require('../../services/careerScanner/scheduler');
 const { success } = require('../../utils/response.util');
 const LinkedInJob = require('../../models/LinkedInJob');
 
@@ -28,7 +28,10 @@ router.post('/run', async (req, res, next) => {
     runDailyCareerScan().catch(err =>
       require('../../config/logger').error(`Manual career scan failed: ${err.message}`)
     );
-    return success(res, null, 'Career scan started in background');
+    runDreamCompanyScan().catch(err =>
+      require('../../config/logger').error(`Manual dream-company scan failed: ${err.message}`)
+    );
+    return success(res, null, 'Career + dream-company scans started in background');
   } catch (err) { next(err); }
 });
 

@@ -22,6 +22,7 @@ const fetchGreenhouse = async ({ name, slug }) => {
       postedAt:    j.updated_at    ? new Date(j.updated_at) : new Date(),
       source:      'career_page',
       platform:    'greenhouse',
+      boardKey:    `greenhouse:${slug}`,
     }));
   } catch (err) {
     if (err.response?.status === 404) return [];   // company not on Greenhouse / slug wrong

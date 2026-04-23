@@ -11,6 +11,7 @@ router.use('/outreach',   require('./outreach.routes'));
 router.use('/billing',    require('./billing.routes'));
 router.use('/admin',      require('./admin'));
 router.use('/linkedin',  require('./linkedin.routes'));
+router.use('/career-scanner', require('./careerScanner.routes'));
 router.use('/geo-jobs', require('./geoJobs.routes'));
 
 router.use('/config',     require('./config.routes'));

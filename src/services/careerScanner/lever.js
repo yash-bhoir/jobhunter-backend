@@ -22,6 +22,7 @@ const fetchLever = async ({ name, slug }) => {
       postedAt:    j.createdAt    ? new Date(j.createdAt) : new Date(),
       source:      'career_page',
       platform:    'lever',
+      boardKey:    `lever:${slug}`,
     }));
   } catch (err) {
     if (err.response?.status === 404) return [];

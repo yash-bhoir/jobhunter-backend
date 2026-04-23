@@ -92,4 +92,16 @@ const LEVER = [
   { name: 'CRED',           slug: 'cred'           },
 ];
 
-module.exports = { GREENHOUSE, ASHBY, LEVER };
+/** Valid `platform:slug` keys for dream-company watchlists (must match scanner job `boardKey`). */
+const ALL_BOARD_KEYS = new Set([
+  ...GREENHOUSE.map((c) => `greenhouse:${c.slug}`),
+  ...ASHBY.map((c) => `ashby:${c.slug}`),
+  ...LEVER.map((c) => `lever:${c.slug}`),
+]);
+
+function isValidDreamWatch(platform, slug) {
+  if (!platform || !slug) return false;
+  return ALL_BOARD_KEYS.has(`${platform}:${slug}`);
+}
+
+module.exports = { GREENHOUSE, ASHBY, LEVER, ALL_BOARD_KEYS, isValidDreamWatch };

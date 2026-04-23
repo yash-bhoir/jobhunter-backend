@@ -3,6 +3,8 @@ const logger  = require('../config/logger');
 const { success }         = require('../utils/response.util');
 const { NotFoundError, ValidationError, AuthError } = require('../utils/errors');
 const { invalidateUserCache } = require('../middleware/auth.middleware');
+const { clearRefreshCookie } = require('../utils/refreshCookie.util');
+const { isAllowedDreamWatch } = require('../services/careerScanner/boardProbe.service');
 
 // ── Get profile ───────────────────────────────────────────────────
 exports.getProfile = async (req, res, next) => {
@@ -10,6 +12,62 @@ exports.getProfile = async (req, res, next) => {
     const user = await User.findById(req.user._id);
     if (!user) throw new NotFoundError('User not found');
     return success(res, user.toSafeObject());
+  } catch (err) {
+    next(err);
+  }
+};
+
+const DREAM_WATCH_MAX = { free: 3, pro: 15, team: 15 };
+
+/**
+ * Replace dream-company watchlist (boards we already index on Greenhouse / Ashby / Lever).
+ * Body: { watches: [{ platform, slug, name }] }
+ */
+exports.updateDreamCompanies = async (req, res, next) => {
+  try {
+    const { watches } = req.body;
+    if (!Array.isArray(watches)) {
+      throw new ValidationError('watches must be an array');
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) throw new NotFoundError('User not found');
+
+    const max = DREAM_WATCH_MAX[user.plan] ?? DREAM_WATCH_MAX.free;
+    if (watches.length > max) {
+      throw new ValidationError(`You can watch up to ${max} companies on your plan`);
+    }
+
+    const seen = new Set();
+    const normalized = [];
+    for (const w of watches) {
+      const platform = (w.platform || '').trim();
+      const slug     = (w.slug || '').trim();
+      const name     = (w.name || '').trim();
+      if (!platform || !slug || !name) {
+        throw new ValidationError('Each watch needs platform, slug, and name');
+      }
+      // Curated list OR any live Greenhouse / Ashby / Lever board we can reach
+      // eslint-disable-next-line no-await-in-loop
+      const allowed = await isAllowedDreamWatch(platform, slug);
+      if (!allowed) {
+        throw new ValidationError(`No public job board found for ${name} (${platform}). Check slug or pick from suggestions.`);
+      }
+      const key = `${platform}:${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalized.push({ platform, slug, name, addedAt: w.addedAt ? new Date(w.addedAt) : new Date() });
+    }
+
+    const updated = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: { dreamCompanyWatches: normalized } },
+      { new: true, runValidators: true }
+    );
+
+    invalidateUserCache(req.user._id);
+    logger.info(`Dream companies updated for ${user.email}: ${normalized.length} watches`);
+    return success(res, updated.toSafeObject(), 'Dream companies updated');
   } catch (err) {
     next(err);
   }
@@ -84,6 +142,9 @@ exports.changePassword = async (req, res, next) => {
     user.password = newPassword;
     await user.save();
 
+    await User.findByIdAndUpdate(req.user._id, { $inc: { refreshSessionVersion: 1 } });
+    invalidateUserCache(String(req.user._id));
+
     logger.info(`Password changed: ${req.user.email}`);
     return success(res, null, 'Password changed successfully');
   } catch (err) {
@@ -108,7 +169,7 @@ function buildResumePayloadFromFile(reqFile, cloud) {
 }
 
 async function syncPrimaryResumeFields(userId) {
-  const fresh = await User.findById(userId).select('+resumeItems.pdfBuffer +resumeBuffer resumeItems resume');
+  const fresh = await User.findById(userId).select(`+resumeBuffer resume ${User.RESUME_PDF_BUFFER_INCLUDE}`);
   const def = (fresh.resumeItems || []).find((r) => r.isDefault) || (fresh.resumeItems || [])[0];
   if (!def) {
     await User.findByIdAndUpdate(userId, { $unset: { resume: '', resumeBuffer: '' } });
@@ -146,7 +207,7 @@ exports.uploadResume = async (req, res, next) => {
 
     const resumeData = buildResumePayloadFromFile(req.file, cloud || {});
 
-    const user = await User.findById(req.user._id).select('+resumeItems.pdfBuffer +resumeBuffer resumeItems resume');
+    const user = await User.findById(req.user._id).select(`+resumeBuffer resume ${User.RESUME_PDF_BUFFER_INCLUDE}`);
     user.resumeItems = user.resumeItems || [];
     if (!user.resumeItems.length && user.resume?.url) {
       user.resumeItems.push({
@@ -261,7 +322,7 @@ exports.patchResumeItem = async (req, res, next) => {
 // ── Delete one resume slot ────────────────────────────────────────
 exports.deleteResumeItem = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('+resumeItems.pdfBuffer resumeItems resume profile');
+    const user = await User.findById(req.user._id).select(`resume profile ${User.RESUME_PDF_BUFFER_INCLUDE}`);
     const item = user.resumeItems.id(req.params.id);
     if (!item) throw new NotFoundError('Resume not found');
     if (user.resumeItems.length === 1) {
@@ -398,12 +459,16 @@ exports.deleteAccount = async (req, res, next) => {
     if (!isMatch) throw new AuthError('Incorrect password');
 
     await User.findByIdAndUpdate(req.user._id, {
-      status:    'deleted',
-      deletedAt: new Date(),
-      email:     `deleted_${Date.now()}_${user.email}`,
+      $inc: { refreshSessionVersion: 1 },
+      $set: {
+        status:    'deleted',
+        deletedAt: new Date(),
+        email:     `deleted_${Date.now()}_${user.email}`,
+      },
     });
 
-    res.clearCookie('refreshToken');
+    invalidateUserCache(String(req.user._id));
+    clearRefreshCookie(res);
     logger.info(`Account deleted: ${req.user.email}`);
     return success(res, null, 'Account deleted successfully');
   } catch (err) {

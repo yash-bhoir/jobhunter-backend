@@ -1,14 +1,17 @@
 require('dotenv').config();
+const logger = require('./src/config/logger');
 
-// ── Global crash protection ────────────────────────────────────────
+// ── Global crash protection (also written to logs/error.log via Winston) ──
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION — shutting down:', err.message, err.stack);
+  logger.error(`UNCAUGHT_EXCEPTION — ${err.message}`, { stack: err.stack });
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('UNHANDLED REJECTION:', reason);
-  // Don't crash — log and continue
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  logger.error(`UNHANDLED_REJECTION — ${msg}`, { stack });
 });
 
 const http   = require('http');
@@ -17,7 +20,6 @@ const { connectDB }        = require('./src/config/database');
 const { connectRedis }     = require('./src/config/redis');
 const { initSocket }       = require('./src/config/socket');
 const { initQueues, startEmailWorker, closeQueues } = require('./src/config/queue');
-const logger               = require('./src/config/logger');
 
 const PORT = process.env.PORT || 5000;
 
@@ -81,7 +83,20 @@ async function startServer() {
       logger.info(`Instance ${process.env.pm_id} — schedulers skipped (not leader)`);
     }
 
-    // 6. Listen
+    // 6. Listen — attach error handler first so EADDRINUSE is not an uncaughtException
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        logger.error(`Port ${PORT} is already in use (EADDRINUSE).`);
+        logger.error('Another API instance is probably still running. Stop it, then restart.');
+        logger.error(`Windows: netstat -ano | findstr :${PORT}  →  note the PID in the last column, then: taskkill /PID <pid> /F`);
+        logger.error(`Or use a different port: set PORT=5001 in backend .env and point the frontend proxy at that port.`);
+      } else {
+        logger.error(`HTTP server error (${err.code || 'n/a'}): ${err.message}`);
+      }
+      const mongoose = require('mongoose');
+      mongoose.connection.close().catch(() => {}).finally(() => process.exit(1));
+    });
+
     server.listen(PORT, () => {
       const instance = process.env.pm_id ? ` (worker ${process.env.pm_id})` : '';
       logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

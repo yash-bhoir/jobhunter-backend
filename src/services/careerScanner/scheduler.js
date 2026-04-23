@@ -14,6 +14,7 @@ const cron         = require('node-cron');
 const User         = require('../../models/User');
 const LinkedInJob  = require('../../models/LinkedInJob');
 const { scanAllPortals, matchJobsForUser } = require('./index');
+const { fetchJobsForBoard } = require('./boardProbe.service');
 const { score }    = require('../jobSearch/scorer');
 const { sendEmail, templates } = require('../../config/mailer');
 const logger       = require('../../config/logger');
@@ -130,16 +131,117 @@ const processUserCareerJobs = async (user, allJobs) => {
   }
 };
 
-/**
- * Register the cron job — runs daily at 08:00.
- */
+// ── Dream company watches (any opening on selected boards) ────────
+const processDreamCompanyJobs = async (user, allJobs) => {
+  const watches = user.dreamCompanyWatches || [];
+  if (!watches.length) return;
+
+  const keySet = new Set(watches.map((w) => `${w.platform}:${w.slug}`));
+  const globalKeys = new Set((allJobs || []).map((j) => j.boardKey).filter(Boolean));
+  let pool = [...(allJobs || [])];
+
+  for (const w of watches) {
+    const k = `${w.platform}:${w.slug}`;
+    if (!globalKeys.has(k)) {
+      try {
+        const extra = await fetchJobsForBoard(w.platform, w.slug, w.name);
+        if (Array.isArray(extra) && extra.length) pool.push(...extra);
+      } catch (err) {
+        logger.warn(`Dream watch fetch ${k}: ${err.message}`);
+      }
+      await new Promise((r) => setTimeout(r, 350));
+    }
+  }
+
+  const matched = pool.filter((j) => j.boardKey && keySet.has(j.boardKey));
+  if (!matched.length) return;
+
+  const existing = await LinkedInJob.find({ userId: user._id }).select('url').lean();
+  const urlSet   = new Set(existing.map((j) => j.url).filter(Boolean));
+  const newJobs  = matched.filter((j) => j.url && !urlSet.has(j.url));
+  if (!newJobs.length) return;
+
+  const jobDocs = newJobs.map((j) => ({
+    userId:      user._id,
+    title:       j.title,
+    company:     j.company,
+    location:    j.location,
+    url:         j.url,
+    description: j.description,
+    postedAt:    j.postedAt,
+    remote:      j.remote,
+    source:      'dream_company',
+    matchScore:  0,
+    status:      'new',
+  }));
+
+  await LinkedInJob.insertMany(jobDocs, { ordered: false }).catch(() => {});
+  logger.info(`Dream company: saved ${jobDocs.length} new jobs for ${user.email}`);
+
+  const last    = user.dreamCompanyLastEmailAt;
+  const diffHrs = last ? (Date.now() - new Date(last).getTime()) / 36e5 : Infinity;
+  if (diffHrs < 23) return;
+
+  try {
+    const name = user.profile?.firstName || 'there';
+    const { subject, html } = templates.dreamCompanyAlert(
+      name,
+      newJobs,
+      process.env.CLIENT_URL || 'http://localhost:3000'
+    );
+    await sendEmail({ to: user.email, subject, html });
+    await User.findByIdAndUpdate(user._id, { dreamCompanyLastEmailAt: new Date() });
+    logger.info(`Dream company email sent to ${user.email}: ${newJobs.length} jobs`);
+  } catch (emailErr) {
+    logger.warn(`Dream company email failed for ${user.email}: ${emailErr.message}`);
+  }
+};
+
+const runDreamCompanyScan = async () => {
+  logger.info('Dream company scanner started');
+  try {
+    const allJobs = await getPortalJobs();
+    if (!allJobs.length) {
+      logger.warn('Dream company scanner: global portal cache empty — user-specific boards only');
+    }
+
+    const users = await User.find({
+      status:              'active',
+      emailVerified:       true,
+      dreamCompanyWatches: { $exists: true, $not: { $size: 0 } },
+      $or: [
+        { 'linkedinAlerts.enabled': true },
+        { 'linkedinAlerts.enabled': { $exists: false } },
+      ],
+    }).lean();
+
+    logger.info(`Dream company scanner: ${users.length} users with watches`);
+
+    for (const user of users) {
+      try {
+        await processDreamCompanyJobs(user, allJobs);
+        await new Promise((r) => setTimeout(r, 400));
+      } catch (err) {
+        logger.warn(`Dream company scan failed for ${user.email}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`Dream company scanner fatal: ${err.message}`);
+  }
+};
+
 const startCareerScanner = () => {
   cron.schedule('0 8 * * *', async () => {
     await runDailyCareerScan();
+    await runDreamCompanyScan();
   });
 
-  logger.info('Career page scanner registered (runs daily at 08:00)');
+  logger.info('Career page + dream-company scanners registered (daily 08:00)');
 };
 
-// Also export for manual trigger via API
-module.exports = { startCareerScanner, runDailyCareerScan, getPortalJobs };
+module.exports = {
+  startCareerScanner,
+  runDailyCareerScan,
+  runDreamCompanyScan,
+  getPortalJobs,
+};

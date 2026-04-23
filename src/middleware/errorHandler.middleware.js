@@ -162,8 +162,8 @@ const errorHandler = (err, req, res, _next) => {
   if (err.required)  payload.required  = err.required;
   if (err.available) payload.available = err.available;
 
-  // Only expose stack in development
-  if (process.env.NODE_ENV === 'development') payload.stack = err.stack;
+  // Only expose stack for 5xx in development — avoid leaking paths on routine 401s
+  if (process.env.NODE_ENV === 'development' && statusCode >= 500) payload.stack = err.stack;
 
   return res.status(statusCode).json(payload);
 };

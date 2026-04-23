@@ -3,6 +3,7 @@ const UserCredits = require('../../models/UserCredits');
 const ActivityLog = require('../../models/ActivityLog');
 const AdminAuditLog = require('../../models/AdminAuditLog');
 const { generateTokens } = require('../../utils/jwt.util');
+const { invalidateUserCache } = require('../../middleware/auth.middleware');
 const { success, paginated } = require('../../utils/response.util');
 const { NotFoundError, ValidationError } = require('../../utils/errors');
 const { PLAN_CREDITS } = require('../../utils/constants');
@@ -111,14 +112,16 @@ exports.changeStatus = async (req, res, next) => {
     const user = await User.findById(req.params.id);
     if (!user) throw new NotFoundError('User not found');
 
-    const update = { status };
+    const update = { $set: { status } };
     if (status === 'banned') {
-      update.banReason = reason || 'Banned by admin';
-      update.bannedAt  = new Date();
-      update.bannedBy  = req.user._id;
+      update.$set.banReason = reason || 'Banned by admin';
+      update.$set.bannedAt  = new Date();
+      update.$set.bannedBy  = req.user._id;
+      update.$inc = { refreshSessionVersion: 1 };
     }
 
     await User.findByIdAndUpdate(req.params.id, update);
+    if (status === 'banned') invalidateUserCache(String(req.params.id));
 
     await AdminAuditLog.create({
       adminId:     req.user._id,
@@ -235,10 +238,11 @@ exports.impersonate = async (req, res, next) => {
     if (!user) throw new NotFoundError('User not found');
 
     const tokens = generateTokens({
-      id:          user._id,
-      role:        user.role,
-      plan:        user.plan,
-      impersonatedBy: req.user._id,
+      id:                     user._id,
+      role:                   user.role,
+      plan:                   user.plan,
+      refreshSessionVersion:  user.refreshSessionVersion ?? 0,
+      impersonatedBy:         req.user._id,
     });
 
     await AdminAuditLog.create({

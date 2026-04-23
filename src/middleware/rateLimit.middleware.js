@@ -36,6 +36,13 @@ const authLimiter = rateLimit(makeOptions(
   { message: 'Too many auth attempts. Try again in 15 minutes.' }
 ));
 
+// ── Refresh / OAuth code exchange — tighter burst control ─────────
+const refreshLimiter = rateLimit(makeOptions(
+  15 * 60 * 1000,
+  60,
+  { message: 'Too many session refreshes. Try again in 15 minutes.' }
+));
+
 // ── Search — prevent expensive API abuse ─────────────────────────
 const searchLimiter = rateLimit(makeOptions(
   60 * 1000,  // 1 min window
@@ -51,12 +58,24 @@ const emailLimiter = rateLimit(makeOptions(
 ));
 
 // ── General API — generous for normal use ────────────────────────
-// At 500K users: 200 req/15min per user = 1.3 req/sec sustained
-const generalLimiter = rateLimit(makeOptions(
-  15 * 60 * 1000,  // 15 min window
-  300,
-  { message: 'Too many requests. Slow down.' }
-));
+// Skip session bootstrap: GET /auth/me is called on every full load / tab; counting it here
+// stacks with HMR reloads and SPA navigations and causes 429 → false "logged out" loops.
+// POST /auth/refresh has its own refreshLimiter on the route.
+const generalLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             300,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, message: 'Too many requests. Slow down.', code: 'RATE_LIMIT' },
+  skip: (req) => {
+    if (process.env.NODE_ENV === 'test') return true;
+    const url = req.originalUrl || req.url || '';
+    if (req.method === 'GET' && url.includes('/auth/me')) return true;
+    if (req.method === 'POST' && url.includes('/auth/refresh')) return true;
+    return false;
+  },
+  store: makeStore(),
+});
 
 // ── Ranking UX events — per-user, generous but stops spam / loops ─
 const rankingEventLimiter = rateLimit({
@@ -72,6 +91,7 @@ const rankingEventLimiter = rateLimit({
 
 module.exports = {
   authLimiter,
+  refreshLimiter,
   searchLimiter,
   emailLimiter,
   generalLimiter,

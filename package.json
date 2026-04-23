@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "nodemon server.js",
+    "logs:errors": "node scripts/tailLogs.js error",
+    "logs:combined": "node scripts/tailLogs.js combined",
     "start": "node server.js",
     "test": "jest --coverage",
     "test:job-apis": "node src/scripts/testJobSearchApis.js",

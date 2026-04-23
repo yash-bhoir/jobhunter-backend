@@ -189,7 +189,7 @@ exports.sendEmail = async (req, res, next) => {
     const ADMIN_PASS  = process.env.ADMIN_EMAIL_PASS || process.env.SMTP_PASS || '';
 
     const user = await User.findById(req.user._id).select(
-      '+smtpAccounts +resumeBuffer +resumeItems.pdfBuffer +gmailRefreshToken +gmailAccessToken +gmailEmail resumeItems resume',
+      `+smtpAccounts +resumeBuffer +gmailRefreshToken +gmailAccessToken +gmailEmail resume ${User.RESUME_PDF_BUFFER_INCLUDE}`,
     );
     const defaultSmtp = (user.smtpAccounts || []).find(a => a.isDefault) || (user.smtpAccounts || [])[0];
     const hasGmail    = !!user.gmailRefreshToken;
@@ -434,7 +434,7 @@ exports.generateLatex = async (req, res, next) => {
     const user = await User.findById(req.user._id).select('profile fullName email resume');
     const active = await ResumeTemplate.findOne({ isActive: true }).sort({ updatedAt: -1 }).lean();
     const opts = {};
-    if (active?.templateCode && active.templateCode.includes('{{BODY}}')) {
+    if (active?.templateCode?.trim()) {
       opts.templateCode = active.templateCode;
     }
     const latex = buildLatexForUser(user, opts);
@@ -448,7 +448,7 @@ exports.generateResumePdf = async (req, res, next) => {
   try {
     const resumeId = req.query.resumeId;
     const user = await User.findById(req.user._id).select(
-      '+resumeBuffer +resumeItems.pdfBuffer profile fullName email resumeItems resume',
+      `+resumeBuffer profile fullName email resume ${User.RESUME_PDF_BUFFER_INCLUDE}`,
     );
     const safeBase = (user.fullName || 'Candidate').replace(/\s+/g, '_');
 
@@ -532,7 +532,9 @@ exports.optimizeResume = async (req, res, next) => {
       });
     }
 
-    const user = await User.findById(req.user._id).select('+resumeBuffer +resumeDocxBuffer +resumeItems.pdfBuffer resumeItems resume profile fullName');
+    const user = await User.findById(req.user._id).select(
+      `+resumeBuffer +resumeDocxBuffer resume profile fullName ${User.RESUME_PDF_BUFFER_INCLUDE}`,
+    );
 
     const hasResumeData = !!(
       user.resume?.url

@@ -325,16 +325,19 @@ function parseEmailToJobs(htmlContent, from, subject) {
     default:            jobs = parseGeneric($, source);        break;
   }
 
-  // Normalize text
+  // Normalize text — keep description (e.g. LinkedIn alert blurbs) for the UI / DB
   return jobs
     .filter(j => j.title?.length > 2)
     .map(j => ({
-      title:    j.title.replace(/\s+/g, ' ').trim(),
-      company:  (j.company  || '').replace(/\s+/g, ' ').trim(),
-      location: (j.location || '').replace(/\s+/g, ' ').trim(),
-      url:      j.url || '',
-      source:   j.source || source,
-      remote:   !!j.remote,
+      title:       j.title.replace(/\s+/g, ' ').trim(),
+      company:     (j.company  || '').replace(/\s+/g, ' ').trim(),
+      location:    (j.location || '').replace(/\s+/g, ' ').trim(),
+      url:         j.url || '',
+      description: typeof j.description === 'string'
+        ? j.description.replace(/\s+/g, ' ').trim()
+        : '',
+      source:      j.source || source,
+      remote:      !!j.remote,
     }));
 }
 

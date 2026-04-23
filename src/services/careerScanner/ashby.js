@@ -46,6 +46,7 @@ const fetchAshby = async ({ name, slug }) => {
       postedAt:    j.publishedDate ? new Date(j.publishedDate) : new Date(),
       source:      'career_page',
       platform:    'ashby',
+      boardKey:    `ashby:${slug}`,
     }));
   } catch (err) {
     if (err.response?.status === 404) return [];

@@ -40,6 +40,16 @@ const authenticate = async (req, _res, next) => {
 
     if (req.user.status === 'banned') throw new ForbiddenError('Account suspended');
 
+    // Align access JWT with refreshSessionVersion (logout / password change / refresh rotation).
+    const uRsv = Number(req.user.refreshSessionVersion ?? 0);
+    const hasRsvClaim = decoded.rsv !== undefined && decoded.rsv !== null;
+    if (!hasRsvClaim) {
+      if (uRsv > 0) throw new AuthError('Session expired');
+    } else {
+      const tokenRsv = Number(decoded.rsv);
+      if (!Number.isFinite(tokenRsv) || tokenRsv !== uRsv) throw new AuthError('Session expired');
+    }
+
     next();
   } catch (err) {
     next(err);

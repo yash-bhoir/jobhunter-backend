@@ -4,7 +4,7 @@ const { body } = require('express-validator');
 const ctrl     = require('../controllers/auth.controller');
 const { validate }     = require('../middleware/validate.middleware');
 const { authenticate } = require('../middleware/auth.middleware');
-const { authLimiter }  = require('../middleware/rateLimit.middleware');
+const { authLimiter, refreshLimiter } = require('../middleware/rateLimit.middleware');
 
 const passwordRule = [
   body('password')
@@ -37,7 +37,14 @@ router.post('/admin/verify-otp',
   ctrl.verifyAdminOtp
 );
 
-router.post('/refresh',       ctrl.refresh);
+router.post('/refresh',        refreshLimiter, ctrl.refresh);
+
+router.post('/oauth-exchange',
+  authLimiter,
+  body('code').trim().notEmpty().withMessage('Code required'),
+  validate,
+  ctrl.oauthExchange
+);
 router.get ('/verify-email',  ctrl.verifyEmail);
 router.post('/forgot-password',
   authLimiter,
@@ -56,8 +63,12 @@ router.get ('/me',     authenticate, ctrl.getMe);
 router.get('/google',          ctrl.googleAuth);
 router.get('/google/callback', ctrl.googleCallback);
 
-// ── Dev only ──────────────────────────────────────────────────────
-if (process.env.NODE_ENV === 'development') {
+// ── Dev only — on by default in development; set ALLOW_DEV_AUTH_ROUTES=false to disable
+const devAuthRoutesEnabled =
+  process.env.NODE_ENV === 'development' &&
+  process.env.ALLOW_DEV_AUTH_ROUTES !== 'false';
+
+if (devAuthRoutesEnabled) {
   router.get('/dev/verify/:email', async (req, res) => {
     try {
       const User = require('../models/User');

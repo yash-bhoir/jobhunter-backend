@@ -8,6 +8,7 @@ const { requireCredits, planGuard } = require('../middleware/credits.middleware'
 router.use(authenticate);
 
 router.get   ('/',                ctrl.getProfile);
+router.patch ('/dream-companies', ctrl.updateDreamCompanies);
 router.patch ('/',                ctrl.updateProfile);
 router.patch ('/password',        ctrl.changePassword);
 router.post  ('/resume',          upload.single('resume'),     ctrl.uploadResume);

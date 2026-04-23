@@ -24,6 +24,8 @@ const SOURCE_ENUM = [
   'email_other',
   'linkedin_alert',   // legacy — RSS / scraped alert
   'linkedin_fetch',   // manual "Fetch from LinkedIn" button
+  'career_page',      // daily ATS scan (Greenhouse / Ashby / Lever) matched to profile
+  'dream_company',    // user-watched board — any new listing on that board
 ];
 
 const linkedInJobSchema = new mongoose.Schema({

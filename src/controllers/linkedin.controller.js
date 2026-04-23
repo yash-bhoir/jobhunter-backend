@@ -8,6 +8,119 @@ const logger                 = require('../config/logger');
 const { encrypt, decrypt }   = require('../utils/crypto.util');
 const { recordClientEventForLinkedInJob } = require('../services/ranking/rankingEvent.service');
 
+/**
+ * Numeric LinkedIn job posting ID from common URL shapes.
+ * Supports slug URLs: /jobs/view/senior-dev-at-acme-4230754809 (ID is the last 6+ digit span).
+ */
+function extractLinkedInNumericJobId(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  let u = rawUrl.trim();
+  try {
+    u = decodeURIComponent(u);
+  } catch (_) {
+    /* keep u */
+  }
+
+  const urnJob = u.match(/urn:li:jobPosting:(\d{6,})/i);
+  if (urnJob) return urnJob[1];
+  const urnFs = u.match(/urn:li:fs_normalized_jobPosting:(\d{6,})/i);
+  if (urnFs) return urnFs[1];
+
+  const current = u.match(/[?&]currentJobId=(\d{6,})/i);
+  if (current) return current[1];
+  const posting = u.match(/[?&]jobPosting[^=]*=(\d{6,})/i);
+  if (posting) return posting[1];
+
+  const viewBlock = u.match(
+    /https?:\/\/(?:[\w-]+\.)*linkedin\.com\/(?:[\w-]+\/)*(?:comm\/)?jobs\/view\/([^?#]+)/i
+  );
+  if (viewBlock) {
+    const pathSeg = viewBlock[1].replace(/\/+$/, '');
+    const plain = pathSeg.match(/^(\d{6,})$/);
+    if (plain) return plain[1];
+    const nums = pathSeg.match(/\d{6,}/g);
+    if (nums && nums.length) return nums[nums.length - 1];
+  }
+
+  return null;
+}
+
+/** Prefer HTML from guest jobPosting markup; fall back to plain text. */
+function descriptionFromGuestJobPostingHtml($g) {
+  const selectors = [
+    '.show-more-less-html__markup',
+    '.description__text',
+    '[data-test-job-description]',
+    'div[class*="jobs-box__html-content"]',
+    '.jobs-description-content__text',
+    '[class*="show-more-less-html"]',
+    '[class*="description__text"]',
+  ];
+  for (const sel of selectors) {
+    const el = $g(sel).first();
+    const html = el.html()?.trim();
+    const text = el.text()?.replace(/\s+/g, ' ').trim();
+    if (html && html.replace(/<[^>]+>/g, '').trim().length > 25) return html;
+    if (text && text.length > 25) return text;
+  }
+  return '';
+}
+
+/** Resolve short / tracking links so IDs can be parsed (lnkd.in, LinkedIn /e/, etc.). */
+async function expandOutboundJobUrl(url) {
+  const axios = require('axios');
+  if (!url || typeof url !== 'string') return url;
+  if (!/(^|\.)lnkd\.in\/|linkedin\.com\/(psettings\/)?e\/|linkedin\.com\/comm\/r\/|bit\.ly\//i.test(url)) {
+    return url;
+  }
+  try {
+    const r = await axios.get(url, {
+      maxRedirects: 15,
+      timeout: 12000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Accept:       'text/html,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      validateStatus: (s) => s >= 200 && s < 400,
+    });
+    const final = r.request?.res?.responseUrl || r.request?.responseURL;
+    if (final && typeof final === 'string' && /^https?:\/\//i.test(final)) return final;
+  } catch (_) {
+    /* keep original */
+  }
+  return url;
+}
+
+/** JobPosting.description from JSON-LD (root, @graph, or array). */
+function extractJobPostingDescriptionFromLdJson(json) {
+  if (!json || typeof json !== 'object') return '';
+  const seen = new Set();
+  const nodes = [];
+
+  function collect(v) {
+    if (!v || typeof v !== 'object') return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    if (Array.isArray(v)) {
+      v.forEach(collect);
+      return;
+    }
+    nodes.push(v);
+    if (v['@graph']) collect(v['@graph']);
+  }
+
+  collect(json);
+
+  for (const node of nodes) {
+    const types = [].concat(node['@type'] || []).map((t) => String(t).toLowerCase());
+    if (!types.includes('jobposting')) continue;
+    const d = node.description;
+    if (d && String(d).trim()) return String(d).trim();
+  }
+  return '';
+}
+
 // ── Get email-sourced jobs only ───────────────────────────────────
 exports.getEmailJobs = async (req, res, next) => {
   try {
@@ -45,12 +158,15 @@ exports.getJobs = async (req, res, next) => {
     const limit      = parseInt(req.query.limit)  || 20;
     const skip       = (page - 1) * limit;
     const status     = req.query.status     || null;
+    const source     = req.query.source     || null; // e.g. 'career_page'
     const sourceType = req.query.sourceType || null; // 'linkedin' → exclude email-sourced jobs
 
     const filter = { userId: req.user._id };
     if (status) filter.status = status;
-    // When sourceType=linkedin, exclude email-parsed jobs (source starts with 'email_')
-    if (sourceType === 'linkedin') {
+    if (source) {
+      filter.source = source;
+    } else if (sourceType === 'linkedin') {
+      // When sourceType=linkedin, exclude email-parsed jobs (source starts with 'email_')
       filter.source = { $in: ['linkedin_alert', 'linkedin_fetch'] };
     }
 
@@ -823,18 +939,20 @@ exports.fetchDescription = async (req, res, next) => {
     const job = await LinkedInJob.findOne({ _id: req.params.id, userId: req.user._id });
     if (!job) throw new NotFoundError('Job not found');
 
-    // Return cached description if already stored
-    if (job.description) return success(res, { description: job.description });
+    const existingDesc = (job.description || '').trim();
+    if (existingDesc.length >= 200) {
+      return success(res, { description: existingDesc });
+    }
 
-    if (!job.url) return success(res, { description: null }, 'No URL to fetch description from');
+    const rawUrl = String(job.url || '').trim();
+    if (!rawUrl) return success(res, { description: null }, 'No URL to fetch description from');
 
     const axios   = require('axios');
     const cheerio = require('cheerio');
 
-    // Extract LinkedIn job ID from any URL format:
-    // /jobs/view/1234567, /comm/jobs/view/1234567, etc.
-    const jobIdMatch = job.url.match(/\/jobs\/view\/(\d+)/);
-    const linkedinJobId = jobIdMatch?.[1];
+    const fetchUrl = await expandOutboundJobUrl(rawUrl);
+    const linkedinJobId =
+      extractLinkedInNumericJobId(fetchUrl) || extractLinkedInNumericJobId(rawUrl);
 
     let description = '';
 
@@ -848,15 +966,13 @@ exports.fetchDescription = async (req, res, next) => {
               'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
               'Accept':          'text/html,application/xhtml+xml',
               'Accept-Language': 'en-US,en;q=0.9',
+              Referer:           'https://www.linkedin.com/jobs/search/',
             },
-            timeout: 12000,
+            timeout: 15000,
           }
         );
         const $g = cheerio.load(guestHtml);
-        description =
-          $g('.show-more-less-html__markup').html()?.trim() ||
-          $g('.description__text').html()?.trim()           ||
-          $g('[class*="description"]').first().html()?.trim() || '';
+        description = descriptionFromGuestJobPostingHtml($g);
 
         // Enrich company/location if missing, then trigger HR search in background
         let enrichedCompany = job.company;
@@ -915,11 +1031,57 @@ exports.fetchDescription = async (req, res, next) => {
         $p('script[type="application/ld+json"]').each((_, el) => {
           if (description) return;
           try {
-            const json = JSON.parse($p(el).html());
-            if (json.description) description = json.description;
+            const raw = $p(el).html();
+            if (!raw) return;
+            const json = JSON.parse(raw.trim());
+            const fromLd = extractJobPostingDescriptionFromLdJson(json);
+            if (fromLd) description = fromLd;
+            else if (json.description) description = json.description;
           } catch {}
         });
       } catch {}
+    }
+
+    // 3. Non-LinkedIn apply URLs (Greenhouse, Lever, Ashby, etc.) — JSON-LD / meta
+    let host = '';
+    try {
+      host = new URL(fetchUrl).hostname.toLowerCase();
+    } catch (_) {
+      /* invalid URL — skip generic fetch */
+    }
+    const isLinkedInHost = host === 'linkedin.com' || host.endsWith('.linkedin.com');
+    if (!description && fetchUrl && !linkedinJobId && !isLinkedInHost) {
+      try {
+        const { data: html } = await axios.get(fetchUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          timeout: 15000,
+          maxRedirects: 8,
+          validateStatus: (s) => s >= 200 && s < 400,
+        });
+        const $x = cheerio.load(html);
+        $x('script[type="application/ld+json"]').each((_, el) => {
+          if (description) return;
+          try {
+            const raw = $x(el).html();
+            if (!raw) return;
+            const json = JSON.parse(raw.trim());
+            const fromLd = extractJobPostingDescriptionFromLdJson(json);
+            if (fromLd) description = fromLd;
+          } catch {}
+        });
+        if (!description) {
+          description =
+            $x('meta[property="og:description"]').attr('content') ||
+            $x('meta[name="description"]').attr('content') ||
+            '';
+        }
+      } catch (err) {
+        logger.warn(`ATS / generic JD fetch failed for LinkedInJob ${req.params.id}: ${err.message}`);
+      }
     }
 
     // Strip HTML tags and clean up
@@ -932,7 +1094,7 @@ exports.fetchDescription = async (req, res, next) => {
       .replace(/[ \t]+/g, ' ')
       .trim();
 
-    if (description.length > 50) {
+    if (description.length > 35) {
       await LinkedInJob.findByIdAndUpdate(req.params.id, { description });
     }
 

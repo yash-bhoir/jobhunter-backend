@@ -1,11 +1,15 @@
+const crypto = require('crypto');
 const User        = require('../models/User');
 const UserCredits = require('../models/UserCredits');
+const OAuthExchangeTicket = require('../models/OAuthExchangeTicket');
 const { generateTokens, verifyRefreshToken } = require('../utils/jwt.util');
 const { generateToken, hashToken }           = require('../utils/crypto.util');
 const { sendEmail, templates }               = require('../config/mailer');
 const { success, created }                   = require('../utils/response.util');
 const { AuthError, ConflictError, NotFoundError, ValidationError } = require('../utils/errors');
 const { PLAN_CREDITS } = require('../utils/constants');
+const { refreshCookieOptions, clearRefreshCookie } = require('../utils/refreshCookie.util');
+const { invalidateUserCache } = require('../middleware/auth.middleware');
 const logger = require('../config/logger');
 
 // ── Helper ────────────────────────────────────────────────────────
@@ -111,9 +115,9 @@ exports.login = async (req, res, next) => {
     if (user.status === 'banned')  throw new AuthError('Account suspended. Contact support.');
     if (user.status === 'deleted') throw new AuthError('Account not found');
 
-    // Check email verified
+    // Same message as bad password to avoid email / state enumeration
     if (!user.emailVerified) {
-      throw new AuthError('Please verify your email before logging in');
+      throw new AuthError('Invalid email or password');
     }
 
     // ── Admin 2-FA: send OTP instead of issuing tokens directly ──
@@ -157,20 +161,14 @@ exports.login = async (req, res, next) => {
     user.status        = 'active';
     await user.save();
 
-    // Generate tokens
     const tokens = generateTokens({
-      id:   user._id,
-      role: user.role,
-      plan: user.plan,
+      id:                     user._id,
+      role:                   user.role,
+      plan:                   user.plan,
+      refreshSessionVersion:  user.refreshSessionVersion ?? 0,
     });
 
-    // Set refresh token as httpOnly cookie
-    res.cookie('refreshToken', tokens.refreshToken, {
-      httpOnly: true,
-      secure:   process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge:   30 * 24 * 60 * 60 * 1000, // 30 days
-    });
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
 
     logger.info(`User logged in: ${email}`);
 
@@ -187,7 +185,9 @@ exports.login = async (req, res, next) => {
 // ── Logout ────────────────────────────────────────────────────────
 exports.logout = async (req, res, next) => {
   try {
-    res.clearCookie('refreshToken');
+    await User.findByIdAndUpdate(req.user._id, { $inc: { refreshSessionVersion: 1 } });
+    invalidateUserCache(String(req.user._id));
+    clearRefreshCookie(res);
     return success(res, null, 'Logged out successfully');
   } catch (err) {
     next(err);
@@ -197,32 +197,85 @@ exports.logout = async (req, res, next) => {
 // ── Refresh Token ─────────────────────────────────────────────────
 exports.refresh = async (req, res, next) => {
   try {
-    // Token can come from cookie or body
-    const token = req.cookies?.refreshToken || req.body?.refreshToken;
+    let token = req.cookies?.refreshToken;
+    if (!token && process.env.ALLOW_REFRESH_TOKEN_BODY === 'true') {
+      token = req.body?.refreshToken;
+    }
     if (!token) throw new AuthError('No refresh token provided');
 
     const decoded = verifyRefreshToken(token);
-    const user    = await User.findById(decoded.id);
+    const user    = await User.findById(decoded.id).select('refreshSessionVersion status role plan');
 
-    if (!user)                    throw new AuthError('User not found');
+    if (!user) throw new AuthError('User not found');
     if (user.status === 'banned') throw new AuthError('Account suspended');
 
+    let tokenRsv = Number(decoded.rsv);
+    const legacyNoRsv = !Number.isFinite(tokenRsv);
+    if (legacyNoRsv) tokenRsv = 0;
+    const currentRsv = Number(user.refreshSessionVersion ?? 0);
+    if (legacyNoRsv && currentRsv > 0) {
+      throw new AuthError('Session expired');
+    }
+    if (tokenRsv !== currentRsv) throw new AuthError('Session expired');
+
+    const updated = await User.findOneAndUpdate(
+      { _id: decoded.id, refreshSessionVersion: currentRsv },
+      { $inc: { refreshSessionVersion: 1 } },
+      { new: true }
+    ).select('role plan refreshSessionVersion');
+
+    if (!updated) throw new AuthError('Session expired');
+
     const tokens = generateTokens({
-      id:   user._id,
-      role: user.role,
-      plan: user.plan,
+      id:                     updated._id,
+      role:                   updated.role,
+      plan:                   updated.plan,
+      refreshSessionVersion:  updated.refreshSessionVersion,
     });
 
-    res.cookie('refreshToken', tokens.refreshToken, {
-      httpOnly: true,
-      secure:   process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge:   30 * 24 * 60 * 60 * 1000,
-    });
+    invalidateUserCache(String(decoded.id));
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
 
     return success(res, { accessToken: tokens.accessToken }, 'Token refreshed');
 
   } catch (err) {
+    // Drop stale httpOnly cookie so the browser stops sending it on every /auth/me + refresh loop.
+    clearRefreshCookie(res);
+    next(err);
+  }
+};
+
+// ── Google OAuth: redeem one-time code (no JWT in URL) ───────────
+exports.oauthExchange = async (req, res, next) => {
+  try {
+    const { code } = req.body;
+    if (!code || typeof code !== 'string') throw new ValidationError('Exchange code is required');
+
+    const ticket = await OAuthExchangeTicket.findOneAndDelete({
+      code: String(code).trim(),
+    });
+
+    if (!ticket) throw new AuthError('Invalid or expired login code');
+
+    const user = await User.findById(ticket.userId);
+    if (!user) throw new AuthError('User not found');
+    if (user.status === 'banned') throw new AuthError('Account suspended');
+
+    const tokens = generateTokens({
+      id:                     user._id,
+      role:                   user.role,
+      plan:                   user.plan,
+      refreshSessionVersion:  user.refreshSessionVersion ?? 0,
+    });
+
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+
+    return success(res, {
+      accessToken: tokens.accessToken,
+      user:        user.toSafeObject(),
+    }, 'Login successful');
+  } catch (err) {
+    clearRefreshCookie(res);
     next(err);
   }
 };
@@ -315,6 +368,9 @@ exports.resetPassword = async (req, res, next) => {
     user.lockUntil            = undefined;
     await user.save();
 
+    await User.findByIdAndUpdate(user._id, { $inc: { refreshSessionVersion: 1 } });
+    invalidateUserCache(String(user._id));
+
     logger.info(`Password reset: ${user.email}`);
 
     return success(res, null, 'Password reset successfully. You can now log in.');
@@ -373,17 +429,13 @@ exports.verifyAdminOtp = async (req, res, next) => {
     await user.save();
 
     const tokens = generateTokens({
-      id:   user._id,
-      role: user.role,
-      plan: user.plan,
+      id:                     user._id,
+      role:                   user.role,
+      plan:                   user.plan,
+      refreshSessionVersion:  user.refreshSessionVersion ?? 0,
     });
 
-    res.cookie('refreshToken', tokens.refreshToken, {
-      httpOnly: true,
-      secure:   process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge:   30 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
 
     logger.info(`Admin verified OTP and logged in: ${user.email}`);
 
@@ -406,21 +458,12 @@ exports.googleCallback = (req, res, next) => {
     }
 
     try {
-      const tokens = generateTokens({
-        id:   user._id,
-        role: user.role,
-        plan: user.plan,
-      });
+      const code = crypto.randomBytes(32).toString('hex');
+      await OAuthExchangeTicket.create({ code, userId: user._id });
 
-      res.cookie('refreshToken', tokens.refreshToken, {
-        httpOnly: true,
-        secure:   process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge:   30 * 24 * 60 * 60 * 1000,
-      });
-
-      // Redirect to frontend with token
-      res.redirect(`${process.env.CLIENT_URL}/auth/callback?token=${tokens.accessToken}`);
+      res.redirect(
+        `${process.env.CLIENT_URL}/auth/callback?code=${encodeURIComponent(code)}`
+      );
     } catch (callbackErr) {
       res.redirect(`${process.env.CLIENT_URL}/login?error=server_error`);
     }
