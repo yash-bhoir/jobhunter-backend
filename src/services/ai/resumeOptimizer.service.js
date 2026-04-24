@@ -263,15 +263,16 @@ const generateResumePdf = (resumeText, userName) => {
   return new Promise((resolve, reject) => {
     try {
       const PDFDocument = require('pdfkit');
-      const doc    = new PDFDocument({ margin: 50, size: 'A4', autoFirstPage: true });
+      const M   = 40;   // margin
+      const doc = new PDFDocument({ margin: M, size: 'A4', autoFirstPage: true });
       const chunks = [];
 
       doc.on('data',  c => chunks.push(c));
       doc.on('end',   () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      const lines = resumeText.split('\n');
-      const PAGE_W    = doc.page.width  - 100; // usable width (margins on both sides)
+      const lines      = resumeText.split('\n');
+      const PAGE_W     = doc.page.width - M * 2;
       const SECTION_RE = /^(SUMMARY|OBJECTIVE|EXPERIENCE|WORK EXPERIENCE|PROFESSIONAL EXPERIENCE|EDUCATION|SKILLS|TECHNICAL SKILLS|KEY SKILLS|CERTIFICATIONS|PROJECTS|ACHIEVEMENTS|AWARDS|LANGUAGES|INTERESTS|VOLUNTEER|PUBLICATIONS|REFERENCES|PROFILE|CAREER OBJECTIVE|EMPLOYMENT)/i;
       const CONTACT_RE = /(@|linkedin\.com|github\.com|\+\d|\d{10}|http)/i;
 
@@ -280,81 +281,66 @@ const generateResumePdf = (resumeText, userName) => {
       // ── Name (first non-empty line) ──────────────────────────────
       while (lineIdx < lines.length && !lines[lineIdx].trim()) lineIdx++;
       if (lineIdx < lines.length) {
-        const nameLine = lines[lineIdx].trim();
-        doc.font('Helvetica-Bold').fontSize(20).fillColor('#1a1a2e')
-           .text(nameLine, 50, 50, { width: PAGE_W, align: 'center' });
+        doc.font('Helvetica-Bold').fontSize(18).fillColor('#1a1a2e')
+           .text(lines[lineIdx].trim(), M, 36, { width: PAGE_W, align: 'center' });
         lineIdx++;
       }
 
-      // ── Contact line(s) — lines right after name that look like contact info ──
+      // ── Contact line(s) ──────────────────────────────────────────
       const contactLines = [];
       while (lineIdx < lines.length) {
         const t = lines[lineIdx].trim();
         if (!t) { lineIdx++; continue; }
         if (CONTACT_RE.test(t) || (contactLines.length === 0 && !SECTION_RE.test(t) && t.length < 120)) {
-          contactLines.push(t);
-          lineIdx++;
-          if (contactLines.length >= 3) break; // max 3 contact lines
-        } else {
-          break;
-        }
+          contactLines.push(t); lineIdx++;
+          if (contactLines.length >= 3) break;
+        } else { break; }
       }
       if (contactLines.length) {
-        doc.moveDown(0.3);
-        doc.font('Helvetica').fontSize(9).fillColor('#555555')
-           .text(contactLines.join('  |  '), 50, doc.y, { width: PAGE_W, align: 'center' });
+        doc.moveDown(0.2);
+        doc.font('Helvetica').fontSize(8.5).fillColor('#555555')
+           .text(contactLines.join('  |  '), M, doc.y, { width: PAGE_W, align: 'center' });
       }
 
       // ── Divider ──────────────────────────────────────────────────
-      doc.moveDown(0.6);
-      doc.moveTo(50, doc.y).lineTo(50 + PAGE_W, doc.y)
-         .lineWidth(1.5).strokeColor('#1a1a2e').stroke();
-      doc.moveDown(0.5);
+      doc.moveDown(0.35);
+      doc.moveTo(M, doc.y).lineTo(M + PAGE_W, doc.y).lineWidth(1.2).strokeColor('#1a1a2e').stroke();
+      doc.moveDown(0.25);
 
       // ── Body lines ───────────────────────────────────────────────
       for (; lineIdx < lines.length; lineIdx++) {
-        const line = lines[lineIdx];
-        const trimmed = line.trim();
+        const trimmed = lines[lineIdx].trim();
 
-        // Blank line → small gap
-        if (!trimmed) {
-          doc.moveDown(0.25);
-          continue;
-        }
+        if (!trimmed) { doc.moveDown(0.1); continue; }
 
-        // Section header
         if (SECTION_RE.test(trimmed) && trimmed.length < 60) {
-          // New page protection — leave space for header + at least 2 body lines
-          if (doc.y > doc.page.height - 120) doc.addPage();
-          doc.moveDown(0.4);
-          doc.font('Helvetica-Bold').fontSize(11).fillColor('#1a1a2e')
-             .text(trimmed.toUpperCase(), 50, doc.y, { width: PAGE_W });
-          const lineY = doc.y + 1;
-          doc.moveTo(50, lineY).lineTo(50 + PAGE_W, lineY)
-             .lineWidth(0.5).strokeColor('#aaaaaa').stroke();
-          doc.moveDown(0.35);
+          if (doc.y > doc.page.height - 100) doc.addPage();
+          doc.moveDown(0.25);
+          doc.font('Helvetica-Bold').fontSize(10.5).fillColor('#1a1a2e')
+             .text(trimmed.toUpperCase(), M, doc.y, { width: PAGE_W });
+          doc.moveTo(M, doc.y + 1).lineTo(M + PAGE_W, doc.y + 1)
+             .lineWidth(0.4).strokeColor('#aaaaaa').stroke();
+          doc.moveDown(0.18);
           continue;
         }
 
-        // Bullet point (•, -, *, ▪)
         if (/^[•\-\*▪]/.test(trimmed)) {
           const bulletText = trimmed.replace(/^[•\-\*▪]\s*/, '');
-          doc.font('Helvetica').fontSize(9.5).fillColor('#222222')
-             .text(`• ${bulletText}`, 60, doc.y, { width: PAGE_W - 10, lineGap: 1.5 });
+          doc.font('Helvetica').fontSize(9).fillColor('#222222')
+             .text(`• ${bulletText}`, M + 10, doc.y, { width: PAGE_W - 12, lineGap: 1 });
           continue;
         }
 
-        // Bold-looking short line (job title / company / degree — typically ≤ 80 chars, no sentence ending)
         const isBoldLine = trimmed.length < 80 && !/[.?!]$/.test(trimmed)
           && /[A-Z]/.test(trimmed[0])
           && (lineIdx + 1 < lines.length ? !SECTION_RE.test(lines[lineIdx + 1].trim()) : true);
 
         if (isBoldLine && /[A-Z]{2,}/.test(trimmed.slice(0, 40))) {
-          doc.font('Helvetica-Bold').fontSize(10).fillColor('#333333')
-             .text(trimmed, 50, doc.y, { width: PAGE_W, lineGap: 1.5 });
+          doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#333333')
+             .text(trimmed, M, doc.y, { width: PAGE_W, lineGap: 1 });
         } else {
-          doc.font('Helvetica').fontSize(9.5).fillColor('#333333')
-             .text(trimmed, 50, doc.y, { width: PAGE_W, lineGap: 1.5 });
+          doc.font('Helvetica').fontSize(9).fillColor('#333333')
+             .text(trimmed, M, doc.y, { width: PAGE_W, lineGap: 1 });
         }
       }
 
@@ -365,95 +351,222 @@ const generateResumePdf = (resumeText, userName) => {
   });
 };
 
-// ── AI: ATS optimization using structured prompt ──────────────────
-// Cache key: MD5(resumeText + jobTitle + jobDescription[:500])
-// TTL: 7 days — same resume + same JD always yields same result.
-// This is the biggest token saver: ~2000 tokens per skipped call.
-const aiOptimizeResume = async ({ resumeText, jobTitle, jobDescription, company, userSkills }) => {
-  const cacheInput = `${resumeText}||${jobTitle}||${(jobDescription || '').slice(0, 500)}`;
-  const ck         = `ai:ats:${crypto.createHash('md5').update(cacheInput).digest('hex')}`;
+// ── Derive experience level from profile years ────────────────────
+const deriveExperienceLevel = (years) => {
+  const y = parseInt(years) || 0;
+  if (y < 2)  return 'entry';
+  if (y < 6)  return 'mid';
+  return 'expert';
+};
+
+// ── CALL 1: JD Decoder ────────────────────────────────────────────
+// Extracts structured brief from the job description: keywords, hard requirements,
+// red flags, seniority signal, and section priority.
+// Cache key: MD5(jobTitle + jd[:500]) — same JD always yields same brief.
+// TTL: 30 days — JDs don't change. One cache hit saves ~400 tokens on every re-run.
+const decodeJobDescription = async ({ jobTitle, jobDescription }) => {
+  const logger = require('../../config/logger');
+  const cacheInput = `jd:${jobTitle}||${(jobDescription || '').slice(0, 500)}`;
+  const ck         = `ai:jd:${crypto.createHash('md5').update(cacheInput).digest('hex')}`;
 
   const cached = await cacheGet(ck);
   if (cached) {
-    const logger = require('../../config/logger');
-    logger.info(`[Resume] AI result cache hit — 0 tokens used`);
-    return { ...cached, tokensUsed: 0, fromCache: true };
+    logger.info('[Resume] JD decode cache hit');
+    return { ...cached, fromCache: true };
   }
 
   if (!process.env.OPENAI_API_KEY) {
     return {
-      updatedResumeText:    resumeText,
-      keywordsAdded:        [`${jobTitle} expertise`],
-      textReplacements:     [],
-      atsScoreBefore:       45,
-      atsScoreAfter:        65,
-      tokensUsed:           0,
+      seniority:        'mid',
+      hard_requirements: [],
+      nice_to_haves:    [],
+      top_keywords:     [jobTitle],
+      red_flags:        [],
+      core_pain_point:  '',
+      section_priority: ['experience', 'skills'],
+      culture_signals:  [],
     };
   }
 
   const client = getClient();
 
-  const systemPrompt = `You are an expert ATS resume optimizer and career coach.
-
-YOUR JOB:
-Deeply analyze the candidate's resume against the job description. Identify every keyword, skill, technology, tool, methodology, and qualification in the JD that is missing or under-represented in the resume. Then rewrite the resume to maximize ATS keyword match while keeping all content truthful.
-
-WHAT YOU CAN CHANGE:
-1. Skills section — add missing keywords from the JD; expand abbreviated skill names
-2. Summary/Objective — rewrite to mirror the JD's language and required qualifications
-3. Bullet points — enhance existing bullets to include JD keywords naturally
-4. Job titles — can add alternative titles in parentheses if they match (e.g. "Software Engineer (Full Stack)")
-5. Technology names — normalize/expand (e.g. "JS" → "JavaScript", "Node" → "Node.js")
-
-WHAT YOU MUST NOT CHANGE:
-- Do NOT add fake companies, fake job titles, or fake degrees
-- Do NOT change dates, company names, or education institution names
-- Do NOT invent experience the candidate doesn't have
-- Do NOT change the section names or order
-
-CRITICAL — text_replacements rules:
-- "find" must be an EXACT copy-paste substring from the resume (character-for-character match)
-- "replace" is the improved version of only that substring
-- You can provide UP TO 15 replacements — use as many as needed to properly optimize
-- Replacements can be multi-sentence (e.g. rewrite a whole summary paragraph)
-- Skills list replacements can add 5-10 keywords at once
-
-OUTPUT — return ONLY valid JSON, no markdown, no explanation:
+  const systemPrompt = `You are an expert recruiter with 15 years of experience. Analyze the job description and return ONLY valid JSON — no markdown, no explanation — matching this exact schema:
 {
-  "text_replacements": [
-    { "find": "exact text from resume", "replace": "improved text with JD keywords" }
-  ],
-  "updated_resume_text": "THE COMPLETE FULL RESUME TEXT with ALL replacements applied — every section, every line",
-  "keywords_added": ["keyword1", "keyword2", "keyword3"],
-  "ats_score_before": "XX%",
-  "ats_score_after": "XX%",
-  "optimization_notes": "Brief explanation of what was changed and why"
-}
+  "seniority": "entry|mid|senior|lead|executive",
+  "hard_requirements": ["must-have skill or qualification"],
+  "nice_to_haves": ["preferred but not required"],
+  "top_keywords": ["up to 12 ATS keywords from the JD"],
+  "red_flags": ["things a resume should NOT mention for this role"],
+  "core_pain_point": "one sentence: what problem this hire is solving",
+  "section_priority": ["experience|skills|projects|education — most important first"],
+  "culture_signals": ["startup|enterprise|research|agency|product"]
+}`;
 
-IMPORTANT: updated_resume_text must be the COMPLETE resume — do not truncate or summarize it.`;
+  const userPrompt = `Analyze this job description for the role: ${jobTitle}
 
-  const userPrompt = `JOB DESCRIPTION — ${jobTitle}${company ? ` at ${company}` : ''}:
-${(jobDescription || '').slice(0, 3000)}
-
----
-
-CANDIDATE RESUME:
-${resumeText}
-
----
-
-CANDIDATE'S CURRENT SKILLS: ${(userSkills || []).join(', ') || 'Not listed'}
-
-Now analyze the gap between the resume and the JD. Identify every missing keyword. Return optimized JSON.`;
+${(jobDescription || '').slice(0, 3000)}`;
 
   const response = await client.chat.completions.create({
-    model:       'gpt-4o-mini',
+    model:           'gpt-4o-mini',
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user',   content: userPrompt   },
     ],
-    max_tokens:  4000,
-    temperature: 0.15,
+    max_tokens:      800,
+    temperature:     0.1,
+    response_format: { type: 'json_object' },
+  });
+
+  let brief;
+  try {
+    brief = JSON.parse(response.choices[0].message.content.trim());
+  } catch {
+    brief = {
+      seniority: 'mid', hard_requirements: [], nice_to_haves: [],
+      top_keywords: [jobTitle], red_flags: [], core_pain_point: '',
+      section_priority: ['experience', 'skills'], culture_signals: [],
+    };
+  }
+
+  await cacheSet(ck, brief, 30 * 24 * 3600);
+  logger.info(`[Resume] JD decoded — ${brief.top_keywords?.length || 0} keywords, seniority=${brief.seniority}`);
+  return brief;
+};
+
+// ── Level-specific writing instructions for Call 2 ────────────────
+const LEVEL_INSTRUCTIONS = {
+  entry: `EXPERIENCE LEVEL: Entry (0–2 years)
+- Lead with Skills and Education — these are the strongest cards at this level
+- Highlight projects, internships, and academic achievements prominently
+- Bullet style: [Action verb] + [what you built/learned] + [technology or outcome]
+- Summary: skills-forward and eager — "Recent graduate with strong X expertise, seeking to..."
+- Keep Skills section prominent and detailed`,
+
+  mid: `EXPERIENCE LEVEL: Mid (2–6 years)
+- Lead with impact — metrics and outcomes over raw responsibilities
+- Show a clear track record of delivery and increasing ownership
+- Bullet style: [Strong verb] + [what you owned or delivered] + [measurable metric or outcome]
+- Summary: confident and delivery-focused — "X years building/leading Y, consistently delivering Z"
+- Balance Skills and Experience sections equally`,
+
+  expert: `EXPERIENCE LEVEL: Expert (6+ years)
+- Lead with Summary — your profile and reputation come first
+- Emphasize leadership, scale, cross-team impact, and technical vision
+- Bullet style: [Scope or org context] + [what you led or architected] + [scale, team size, or business result]
+- Summary: vision and scale-focused — "Senior X with Y years leading Z at scale"
+- Skills section should be brief — expertise is implied by the experience
+- Education at the bottom, minimal detail`,
+};
+
+// ── CALL 2: Content Optimizer ─────────────────────────────────────
+// Takes the JD brief from Call 1 + resume text + experience level.
+// Rewrites the resume with level-aware tone, bullet structure, and JD keyword alignment.
+// Cache key: MD5(resumeText + jdBrief + level) — 7 days.
+const optimizeResumeContent = async ({ resumeText, jdBrief, level, jobTitle, company, userSkills }) => {
+  const logger = require('../../config/logger');
+  const cacheInput = `opt:${resumeText}||${JSON.stringify(jdBrief)}||${level}`;
+  const ck         = `ai:opt:${crypto.createHash('md5').update(cacheInput).digest('hex')}`;
+
+  const cached = await cacheGet(ck);
+  if (cached) {
+    logger.info('[Resume] Optimize cache hit — 0 tokens used');
+    return { ...cached, tokensUsed: 0, fromCache: true };
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return {
+      updatedResumeText: resumeText,
+      keywordsAdded:     jdBrief.top_keywords || [],
+      textReplacements:  [],
+      atsScoreBefore:    45,
+      atsScoreAfter:     65,
+      fitScore:          60,
+      gapAnalysis:       [],
+      changesMade:       [],
+      tokensUsed:        0,
+    };
+  }
+
+  const client = getClient();
+
+  const systemPrompt = `You are an elite resume writer and ATS optimization expert.
+
+${LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.mid}
+
+RULES:
+1. NEVER invent facts, metrics, companies, job titles, or degrees
+2. DO reframe existing experience with stronger verbs and clearer outcomes
+3. DO reorder bullets within each role so the most JD-relevant ones appear first
+4. Add missing JD keywords naturally — never keyword-stuff
+5. Expand abbreviated tech names (e.g. "JS" → "JavaScript", "Node" → "Node.js")
+6. Return ONLY valid JSON — no markdown, no explanation
+
+OUTPUT SCHEMA:
+{
+  "text_replacements": [
+    { "find": "exact substring from original resume", "replace": "improved version with JD keywords" }
+  ],
+  "updated_resume_text": "COMPLETE resume text with ALL replacements applied — every section, every line",
+  "sections": {
+    "name": "candidate full name",
+    "phone": "phone number",
+    "email": "email address",
+    "city": "city, state/country",
+    "linkedin": "linkedin URL if present",
+    "portfolio": "portfolio/github URL if present",
+    "summary": "2-3 sentence professional summary (optimized)",
+    "experience": [
+      { "company": "", "title": "", "dates": "", "location": "", "bullets": ["rewritten bullet 1"] }
+    ],
+    "education": [
+      { "school": "", "degree": "", "dates": "", "location": "" }
+    ],
+    "projects": [
+      { "name": "", "tech": "", "bullets": ["bullet 1"] }
+    ],
+    "skills": {
+      "primary": ["most relevant skills first"],
+      "secondary": ["other skills"]
+    }
+  },
+  "keywords_added": ["keyword1", "keyword2"],
+  "ats_score_before": "XX%",
+  "ats_score_after": "XX%",
+  "fit_score": 0-100,
+  "gap_analysis": ["missing skill or experience 1", "missing skill or experience 2"],
+  "changes_made": ["summary of key change 1", "key change 2"],
+  "optimization_notes": "brief overall explanation of what changed and why"
+}
+
+IMPORTANT: updated_resume_text must be the COMPLETE resume — do not truncate or summarize it.
+IMPORTANT: text_replacements "find" must be an EXACT copy-paste substring from the resume (character-for-character).
+IMPORTANT: sections must be populated even if some fields are empty strings — never omit the sections object.`;
+
+  const userPrompt = `TARGET ROLE: ${jobTitle}${company ? ` at ${company}` : ''}
+
+JD ANALYSIS (from Call 1 decoder):
+- Hard requirements: ${(jdBrief.hard_requirements || []).join(', ') || 'Not specified'}
+- Top ATS keywords:  ${(jdBrief.top_keywords     || []).join(', ') || 'Not specified'}
+- Nice-to-haves:     ${(jdBrief.nice_to_haves    || []).join(', ') || 'Not specified'}
+- Avoid mentioning:  ${(jdBrief.red_flags        || []).join(', ') || 'None'}
+- Core pain point:   ${jdBrief.core_pain_point   || 'Not specified'}
+- Section priority:  ${(jdBrief.section_priority || []).join(' > ')}
+
+CANDIDATE RESUME:
+${resumeText}
+
+CANDIDATE'S CURRENT SKILLS: ${(userSkills || []).join(', ') || 'Not listed'}
+
+Optimize the resume for this specific role and experience level. Return the JSON.`;
+
+  const response = await client.chat.completions.create({
+    model:           'gpt-4o',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userPrompt   },
+    ],
+    max_tokens:      4000,
+    temperature:     0.15,
     response_format: { type: 'json_object' },
   });
 
@@ -463,12 +576,15 @@ Now analyze the gap between the resume and the JD. Identify every missing keywor
     parsed = JSON.parse(raw);
   } catch {
     return {
-      updatedResumeText:  resumeText,
-      keywordsAdded:      [],
-      textReplacements:   [],
-      atsScoreBefore:     0,
-      atsScoreAfter:      0,
-      tokensUsed:         response.usage?.total_tokens || 0,
+      updatedResumeText: resumeText,
+      keywordsAdded:     [],
+      textReplacements:  [],
+      atsScoreBefore:    0,
+      atsScoreAfter:     0,
+      fitScore:          0,
+      gapAnalysis:       [],
+      changesMade:       [],
+      tokensUsed:        response.usage?.total_tokens || 0,
     };
   }
 
@@ -476,18 +592,20 @@ Now analyze the gap between the resume and the JD. Identify every missing keywor
   const after  = parseInt(String(parsed.ats_score_after  || '0').replace('%', '')) || 0;
 
   const result = {
-    updatedResumeText:  parsed.updated_resume_text  || resumeText,
-    keywordsAdded:      parsed.keywords_added       || [],
-    textReplacements:   parsed.text_replacements    || [],
-    atsScoreBefore:     before,
-    atsScoreAfter:      after,
-    optimizationNotes:  parsed.optimization_notes  || '',
-    tokensUsed:         response.usage?.total_tokens || 0,
+    updatedResumeText: parsed.updated_resume_text || resumeText,
+    sections:          parsed.sections            || null,
+    keywordsAdded:     parsed.keywords_added      || [],
+    textReplacements:  parsed.text_replacements   || [],
+    atsScoreBefore:    before,
+    atsScoreAfter:     after,
+    fitScore:          typeof parsed.fit_score === 'number' ? parsed.fit_score : 0,
+    gapAnalysis:       parsed.gap_analysis        || [],
+    changesMade:       parsed.changes_made        || [],
+    optimizationNotes: parsed.optimization_notes  || '',
+    tokensUsed:        response.usage?.total_tokens || 0,
   };
 
-  // Cache for 7 days — same resume + same JD always yields same optimization
   await cacheSet(ck, result, 7 * 24 * 3600);
-
   return result;
 };
 
@@ -561,6 +679,8 @@ const optimizeResumeForJob = async ({
   userProvidedText,
   profileFallbackText, // profile-derived text when PDF extraction is empty
   existingSkills,
+  experienceYears,     // from user.profile.experience — drives level selection
+  templateId,          // ResumeTemplate _id — null means "keep original format" (PDFKit basic)
   jobTitle,
   jobDescription,
   company,
@@ -613,22 +733,51 @@ const optimizeResumeForJob = async ({
     throw err;
   }
 
-  // 2. AI optimization — returns minimal text replacements + updated text
-  const aiResult = await aiOptimizeResume({
-    resumeText:   originalText,
+  // 2. Two-call AI pipeline
+  const level = deriveExperienceLevel(experienceYears);
+  logger.info(`[Resume] Experience level: ${level} (${experienceYears || 0} yrs)`);
+
+  // Call 1 — decode the JD into structured brief (cheap, cached 30 days)
+  const jdBrief = await decodeJobDescription({ jobTitle, jobDescription });
+
+  // Call 2 — level-aware resume rewrite using the decoded brief (gpt-4o, cached 7 days)
+  const aiResult = await optimizeResumeContent({
+    resumeText: originalText,
+    jdBrief,
+    level,
     jobTitle,
-    jobDescription,
     company,
-    userSkills:   existingSkills,
+    userSkills: existingSkills,
   });
 
-  // 3. Build output files
-  // PDF: generate formatted PDF from AI-updated text (glyph encoding prevents direct patching)
-  logger.info(`[Resume] Generating formatted PDF (${aiResult.updatedResumeText?.length || 0} chars)`);
-  // Apply ATS normalization before PDF generation (career-ops inspired)
-  const atsCleanText = normalizeTextForATS(aiResult.updatedResumeText || '');
-  const optimizedPdfBuffer = await generateResumePdf(atsCleanText, userName);
-  logger.info(`[Resume] Generated PDF: ${optimizedPdfBuffer.length} bytes`);
+  // 3. Build output PDF
+  let optimizedPdfBuffer;
+  let usedTemplate = null;
+
+  if (templateId && aiResult.sections) {
+    // Template mode: render structured sections with the chosen PDFKit template
+    try {
+      const ResumeTemplate        = require('../../models/ResumeTemplate');
+      const { renderResumeWithTemplate } = require('../resume/templateRenderer');
+      const tpl = await ResumeTemplate.findById(templateId).lean();
+      if (tpl) {
+        usedTemplate = tpl;
+        logger.info(`[Resume] Rendering with template "${tpl.name}" (style=${tpl.style})`);
+        optimizedPdfBuffer = await renderResumeWithTemplate(aiResult.sections, tpl);
+        logger.info(`[Resume] Template PDF: ${optimizedPdfBuffer.length} bytes`);
+      }
+    } catch (tplErr) {
+      logger.warn(`[Resume] Template render failed (${tplErr.message}) — falling back to basic PDF`);
+    }
+  }
+
+  if (!optimizedPdfBuffer) {
+    // "Keep original format" or template render failed: basic PDFKit from AI text
+    logger.info(`[Resume] Generating basic PDF (${aiResult.updatedResumeText?.length || 0} chars)`);
+    const atsCleanText = normalizeTextForATS(aiResult.updatedResumeText || '');
+    optimizedPdfBuffer = await generateResumePdf(atsCleanText, userName);
+    logger.info(`[Resume] Basic PDF: ${optimizedPdfBuffer.length} bytes`);
+  }
 
   // DOCX: if user uploaded a .docx, patch keywords directly in the XML — exact layout preserved
   let optimizedDocxBuffer = null;
@@ -647,10 +796,17 @@ const optimizeResumeForJob = async ({
     optimizedPdfBuffer,
     optimizedDocxBuffer,    // null if no DOCX uploaded; Buffer if patched
     updatedResumeText:  aiResult.updatedResumeText,
+    sections:           aiResult.sections,
     textReplacements:   aiResult.textReplacements,
     keywordsAdded:      aiResult.keywordsAdded,
     atsScoreBefore:     aiResult.atsScoreBefore,
     atsScoreAfter:      aiResult.atsScoreAfter,
+    fitScore:           aiResult.fitScore,
+    gapAnalysis:        aiResult.gapAnalysis,
+    changesMade:        aiResult.changesMade,
+    optimizationNotes:  aiResult.optimizationNotes,
+    level,
+    usedTemplate:       usedTemplate ? { _id: usedTemplate._id, name: usedTemplate.name, style: usedTemplate.style } : null,
     tokensUsed:         aiResult.tokensUsed,
     usedOriginalPdf:    false,
     hasDocx:            !!optimizedDocxBuffer,
@@ -662,4 +818,7 @@ module.exports = {
   extractResumeText,
   optimizeResumeForJob,
   normalizeTextForATS,
+  generateResumePdf,
+  deriveExperienceLevel,
+  decodeJobDescription,
 };

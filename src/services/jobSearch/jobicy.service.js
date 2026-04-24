@@ -1,12 +1,26 @@
-const axios = require('axios');
+const axios  = require('axios');
+const logger = require('../../config/logger');
 
 const search = async ({ role }) => {
-  const { data } = await axios.get('https://jobicy.com/api/v2/remote-jobs', {
-    params:  { tag: role, count: 20 },
-    timeout: 8000,
-  });
+  // Jobicy tag param expects a slug (e.g. "software-developer"), not a phrase.
+  const tag = (role || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  let data;
+  try {
+    ({ data } = await axios.get('https://jobicy.com/api/v2/remote-jobs', {
+      params:         { tag, count: 20 },
+      timeout:        8000,
+      validateStatus: s => s < 500,
+    }));
+  } catch (err) {
+    logger.warn(`[jobicy] ${err.message}`);
+    return [];
+  }
+  if (!data?.jobs) {
+    logger.warn('[jobicy] unexpected response — no jobs key');
+    return [];
+  }
 
-  return (data?.jobs || []).map(j => ({
+  return (data.jobs || []).map(j => ({
     externalId:  String(j.id || ''),
     title:       j.jobTitle    || '',
     company:     j.companyName || '',

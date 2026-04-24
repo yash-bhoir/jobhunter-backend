@@ -20,6 +20,9 @@ tmp/
 # Build / compiled
 dist/
 
+# Test coverage
+coverage/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -13,6 +13,16 @@ const COMPANIES = [
   'anduril', 'greenhouse', 'sourcegraph', 'teleport', 'pulumi',
 ];
 
+// Split role into tokens; match if ANY token appears in the job title.
+// "software developer" → ["software","developer"] matches "Software Engineer" via "software".
+function titleMatchesRole(title, roleKeyword) {
+  if (!roleKeyword) return true;
+  const tokens = roleKeyword.toLowerCase().split(/\s+/).filter(t => t.length > 3);
+  if (!tokens.length) return true;
+  const t = (title || '').toLowerCase();
+  return tokens.some(tok => t.includes(tok));
+}
+
 const fetchCompany = async (company, roleKeyword) => {
   try {
     const { data } = await axios.get(
@@ -22,9 +32,8 @@ const fetchCompany = async (company, roleKeyword) => {
 
     if (!data?.jobs) return [];
 
-    const kw = (roleKeyword || '').toLowerCase();
     return data.jobs
-      .filter(j => !kw || (j.title || '').toLowerCase().includes(kw))
+      .filter(j => titleMatchesRole(j.title, roleKeyword))
       .map(j => ({
         externalId:  String(j.id   || ''),
         title:       j.title       || '',

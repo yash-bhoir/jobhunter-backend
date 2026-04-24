@@ -6,7 +6,11 @@ const search = async ({ role, location, workType, skills = [] }) => {
   // returns results that actually mention the user's tech stack.
   const topSkills   = skills.slice(0, 4).join(' ');
   const roleQuery   = topSkills ? `${role} ${topSkills}` : role;
-  const query       = location ? `${roleQuery} in ${location}` : roleQuery;
+  // For remote jobs, skip location — remote_jobs_only=true already scopes it globally.
+  // Including a specific city (e.g. "in Bengaluru") with remote_jobs_only returns 0 results.
+  const query = (workType === 'remote' || !location)
+    ? roleQuery
+    : `${roleQuery} in ${location}`;
 
   // Map experience to JSearch employment type / date filter
   // JSearch uses date_posted to trim staleness; keep to 'month' for freshness.

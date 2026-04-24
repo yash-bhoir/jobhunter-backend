@@ -513,13 +513,56 @@ exports.deleteEmail = async (req, res, next) => {
   }
 };
 
+// ── Render resume PDF from edited text (no AI — pure layout) ─────
+exports.renderResumePdf = async (req, res, next) => {
+  try {
+    const { text, templateId, sections } = req.body;
+    if (!text?.trim() && !sections) throw new ValidationError('text is required');
+
+    const { generateResumePdf, normalizeTextForATS } = require('../services/ai/resumeOptimizer.service');
+    const { renderResumeWithTemplate } = require('../services/resume/templateRenderer');
+
+    let pdfBuffer;
+
+    if (templateId && sections) {
+      try {
+        const ResumeTemplate = require('../models/ResumeTemplate');
+        const tpl = await ResumeTemplate.findById(templateId).lean();
+        if (tpl) {
+          pdfBuffer = await renderResumeWithTemplate(sections, tpl);
+        }
+      } catch { /* fall through to text path */ }
+    }
+
+    if (!pdfBuffer) {
+      const clean = normalizeTextForATS(text || '');
+      pdfBuffer = await generateResumePdf(clean, '');
+    }
+
+    const name = (req.user?.profile?.firstName || 'Optimized').replace(/\s+/g, '_');
+    return success(res, {
+      resumeBuffer: pdfBuffer.toString('base64'),
+      filename:     `${name}_Resume_Edited.pdf`,
+    });
+  } catch (err) { next(err); }
+};
+
+// ── List resume templates (authenticated users) ───────────────────
+exports.listResumeTemplates = async (req, res, next) => {
+  try {
+    const ResumeTemplate = require('../models/ResumeTemplate');
+    const templates = await ResumeTemplate.find({ isActive: true })
+      .sort({ updatedAt: -1 })
+      .select('name description style accentColor preview')
+      .lean();
+    return success(res, templates);
+  } catch (err) { next(err); }
+};
+
 // ── Optimize resume keywords (Pro only) ──────────────────────────
-// Generates a keyword-tailored PDF version of the user's resume
-// targeting a specific job description. Layout/structure preserved,
-// only skill keywords and summary phrases are updated.
 exports.optimizeResume = async (req, res, next) => {
   try {
-    const { jobTitle, jobDescription, company, resumeText: userProvidedText, resumeId } = req.body;
+    const { jobTitle, jobDescription, company, resumeText: userProvidedText, resumeId, templateId } = req.body;
 
     if (!jobTitle) throw new ValidationError('jobTitle is required');
 
@@ -567,13 +610,15 @@ exports.optimizeResume = async (req, res, next) => {
       resumeUrl,
       resumePublicId,
       resumeDbBuffer,
-      resumeDocxBuffer:   user.resumeDocxBuffer  || null,
-      userProvidedText:   userProvidedText       || null,
+      resumeDocxBuffer:    user.resumeDocxBuffer  || null,
+      userProvidedText:    userProvidedText       || null,
       profileFallbackText: buildProfileFallbackResumeText(user),
-      existingSkills:     user.profile?.skills   || [],
+      existingSkills:      user.profile?.skills   || [],
+      experienceYears:     user.profile?.experience ?? 0,
+      templateId:          templateId             || null,
       jobTitle,
-      jobDescription:     jobDescription         || '',
-      company:            company                || '',
+      jobDescription:      jobDescription         || '',
+      company:             company                || '',
       userName,
     });
 
@@ -596,7 +641,13 @@ exports.optimizeResume = async (req, res, next) => {
       keywordsAdded:      result.keywordsAdded,
       atsScoreBefore:     result.atsScoreBefore,
       atsScoreAfter:      result.atsScoreAfter,
+      // New: fit score, gap analysis, changes made, level + template used
+      fitScore:           result.fitScore,
+      gapAnalysis:        result.gapAnalysis,
+      changesMade:        result.changesMade,
       optimizationNotes:  result.optimizationNotes,
+      level:              result.level,
+      usedTemplate:       result.usedTemplate,
       tokensUsed:         result.tokensUsed,
       usedOriginalPdf:    !!result.originalBuffer,
     }, 'Resume optimized successfully');

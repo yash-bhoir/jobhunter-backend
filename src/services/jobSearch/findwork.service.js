@@ -12,8 +12,9 @@ const search = async ({ role, location, workType }) => {
     ordering: '-date',
   };
 
-  if (location) params.location = location;
+  // Remote + city together over-constrains Findwork (US-centric index); use remote flag only.
   if (workType === 'remote') params.remote = true;
+  else if (location) params.location = location;
 
   const { data } = await axios.get('https://findwork.dev/api/jobs/', {
     params,

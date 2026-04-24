@@ -9,36 +9,84 @@
 const axios  = require('axios');
 const logger = require('../../config/logger');
 
-const search = async ({ role, location, workType }) => {
-  const apiKey = process.env.SERPAPI_KEY;
-  if (!apiKey) return []; // key not configured — skip silently
+/** Raw `jobs_results` rows (shared with indeed-rss Indeed-only fallback). Uses `params._gjCache` for single-flight per search. */
+async function fetchGoogleJobsRows(params) {
+  const { role, location, workType } = params;
+  const apiKey = (process.env.SERPAPI_KEY || '').trim();
+  if (!apiKey) return [];
+
+  const c = params && params._gjCache;
+  if (c) {
+    if (c.rows != null) return c.rows;
+    if (!c.promise) {
+      c.promise = (async () => {
+        const q = workType === 'remote'
+          ? `${role} remote`
+          : location ? `${role} ${location}` : role;
+
+        const { data } = await axios.get('https://serpapi.com/search', {
+          params: {
+            engine:     'google_jobs',
+            q,
+            location:   location || undefined,
+            hl:         'en',
+            api_key:    apiKey,
+          },
+          timeout: 15000,
+        });
+        const rows = data?.jobs_results || [];
+        c.rows = rows;
+        return rows;
+      })();
+    }
+    return c.promise;
+  }
+
+  const q = workType === 'remote'
+    ? `${role} remote`
+    : location ? `${role} ${location}` : role;
+
+  const { data } = await axios.get('https://serpapi.com/search', {
+    params: {
+      engine:     'google_jobs',
+      q,
+      location:   location || undefined,
+      hl:         'en',
+      api_key:    apiKey,
+    },
+    timeout: 15000,
+  });
+
+  return data?.jobs_results || [];
+}
+
+const search = async (params) => {
+  if (!(process.env.SERPAPI_KEY || '').trim()) return [];
 
   try {
-    const q = workType === 'remote'
-      ? `${role} remote`
-      : location ? `${role} ${location}` : role;
+    const rows = await fetchGoogleJobsRows(params);
 
-    const { data } = await axios.get('https://serpapi.com/search', {
-      params: {
-        engine:     'google_jobs',
-        q,
-        location:   location || undefined,
-        hl:         'en',
-        api_key:    apiKey,
-      },
-      timeout: 15000,
-    });
+    if (rows.length) {
+      const byVia = rows.reduce((acc, j) => {
+        const v = (j.via || 'unknown').trim() || 'unknown';
+        acc[v] = (acc[v] || 0) + 1;
+        return acc;
+      }, {});
+      logger.info(`[serpapi] ${rows.length} jobs — boards (via): ${JSON.stringify(byVia)}`);
+    } else {
+      logger.info('[serpapi] 0 jobs for this query (Google Jobs index empty for q/location)');
+    }
 
-    return (data?.jobs_results || []).map(j => ({
+    return rows.map(j => ({
       externalId:  `serpapi-${j.job_id || Buffer.from(j.title + j.company_name).toString('base64').slice(0, 12)}`,
       title:       j.title       || '',
       company:     j.company_name || '',
-      location:    j.location    || location || '',
+      location:    j.location    || params.location || '',
       description: (j.description || '').slice(0, 600),
       url:         j.share_link  || j.related_links?.[0]?.link || '',
       salary:      j.detected_extensions?.salary || 'Not specified',
       source:      `Google Jobs (${j.via || 'SerpAPI'})`,
-      remote:      j.detected_extensions?.work_from_home || workType === 'remote' || false,
+      remote:      j.detected_extensions?.work_from_home || params.workType === 'remote' || false,
       postedAt:    j.detected_extensions?.posted_at || null,
     }));
   } catch (err) {
@@ -47,4 +95,4 @@ const search = async ({ role, location, workType }) => {
   }
 };
 
-module.exports = { search };
+module.exports = { search, fetchGoogleJobsRows };

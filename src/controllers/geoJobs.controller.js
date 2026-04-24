@@ -604,7 +604,7 @@ const getNearbyJobs = async (req, res, next) => {
       ? await GeoJob.countDocuments(countQueryTitled)
       : geoJobsInRadiusAllTitles;
 
-    const liveNearBase = { ...baseGeoQuery, ...GEOJOB_REAL_LISTING_FILTER };
+    const liveNearBase = { ...withinQuery, ...GEOJOB_REAL_LISTING_FILTER };
     const liveGeoJobsInRadiusTotal = await GeoJob.countDocuments(liveNearBase);
 
     const finalQuery = { ...baseGeoQuery, ...GEOJOB_REAL_LISTING_FILTER };

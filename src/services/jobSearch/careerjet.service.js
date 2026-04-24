@@ -35,6 +35,7 @@ const search = async ({ role, location, clientIp, clientUserAgent }) => {
   try {
     const { data, status } = await axios.get(BASE, {
       auth:    { username: apiKey, password: '' },
+      headers: { Referer: process.env.SITE_URL || process.env.CLIENT_URL || 'http://localhost:3000' },
       params:  {
         locale_code: pickLocale(location),
         keywords:    role,

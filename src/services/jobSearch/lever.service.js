@@ -12,6 +12,14 @@ const COMPANIES = [
   'weights-biases', 'modal', 'fly',
 ];
 
+function titleMatchesRole(title, roleKeyword) {
+  if (!roleKeyword) return true;
+  const tokens = roleKeyword.toLowerCase().split(/\s+/).filter(t => t.length > 3);
+  if (!tokens.length) return true;
+  const t = (title || '').toLowerCase();
+  return tokens.some(tok => t.includes(tok));
+}
+
 const fetchCompany = async (company, roleKeyword) => {
   try {
     const { data } = await axios.get(
@@ -19,9 +27,8 @@ const fetchCompany = async (company, roleKeyword) => {
       { params: { mode: 'json', limit: 50 }, timeout: 8000 }
     );
 
-    const kw = (roleKeyword || '').toLowerCase();
     return (Array.isArray(data) ? data : [])
-      .filter(j => !kw || (j.text || '').toLowerCase().includes(kw))
+      .filter(j => titleMatchesRole(j.text, roleKeyword))
       .map(j => ({
         externalId:  j.id              || '',
         title:       j.text            || '',

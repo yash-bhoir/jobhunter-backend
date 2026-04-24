@@ -54,20 +54,22 @@ const PLATFORM_META = {
   themuse:        { type: 'free', defaultEnabled: true  },
   careerjet:      { type: 'free', defaultEnabled: true  },
   'linkedin-rss': { type: 'free', defaultEnabled: true  },
-  // Indeed RSS is usually blocked (Cloudflare) from servers; admin can re-enable if using a proxy.
-  'indeed-rss':   { type: 'free', defaultEnabled: false },
-  // Naukri job API returns 406 "recaptcha required" without a real browser session.
-  naukri:         { type: 'free', defaultEnabled: false },
-  // Wellfound is behind DataDome; server-side fetch rarely succeeds.
-  wellfound:      { type: 'free', defaultEnabled: false },
+  // Indeed: RSS usually blocked; with SERPAPI_KEY, indeed-rss uses SerpAPI Google Jobs Indeed-only fallback.
+  'indeed-rss':   { type: 'free', defaultEnabled: true  },
+  // Naukri: direct API often 406; with APIFY_TOKEN uses Apify actor automation-lab~naukri-scraper (paid).
+  naukri:         { type: 'paid', defaultEnabled: true  },
+  // Wellfound: direct HTML usually 403 DataDome; with APIFY_TOKEN uses thirdwatch~wellfound-jobs-scraper (paid).
+  wellfound:      { type: 'paid', defaultEnabled: true  },
   // ── New aggregators ──────────────────────────────────────────────
   jooble:         { type: 'paid', defaultEnabled: true  }, // JOOBLE_API_KEY set
   findwork:       { type: 'paid', defaultEnabled: true  }, // FINDWORK_API_KEY set
   // ── ATS free direct listings (on by default) ─────────────────────
   greenhouse:     { type: 'free', defaultEnabled: true  }, // Big Tech direct listings
   lever:          { type: 'free', defaultEnabled: true  }, // Startup direct listings
-  ashby:          { type: 'free', defaultEnabled: true  }, // High-growth company listings
-  recruitee:      { type: 'free', defaultEnabled: true  }, // EU company listings
+  // Ashby: JSON API returns 401; job board HTML embeds jobPostings — see ashby.service.js fallback.
+  ashby:          { type: 'free', defaultEnabled: true  },
+  // Recruitee: public GET {slug}.recruitee.com/api/offers — works; company slug list must stay curated.
+  recruitee:      { type: 'free', defaultEnabled: true  },
   // ── Paid platforms ───────────────────────────────────────────────
   serpapi:        { type: 'paid', defaultEnabled: true  }, // SERPAPI_KEY set
   reed:           { type: 'paid', defaultEnabled: true  }, // REED_API_KEY set
@@ -183,6 +185,10 @@ const runJobSearch = async (params, user, plan, onProgress) => {
 
   logger.info(`[jobSearch] platforms (${platforms.length}): ${platforms.join(', ')}`);
 
+  // One SerpAPI `google_jobs` fetch per search when both indeed-rss + serpapi need raw rows (see fetchGoogleJobsRows).
+  const gjCache = {};
+  const paramsForSearch = { ...params, _gjCache: gjCache };
+
   // Build profile enrichment — merged skills from profile + resume, deduplicated.
   // Passed to every platform service so they can tailor queries.
   const profileSkills = [
@@ -202,7 +208,7 @@ const runJobSearch = async (params, user, plan, onProgress) => {
     }
 
     // Redis cache check (keyed by skills fingerprint so enriched queries stay separate)
-    const ck     = cacheKey(name, params.role, params.location, params.workType, uniqueSkills);
+    const ck     = cacheKey(name, paramsForSearch.role, paramsForSearch.location, paramsForSearch.workType, uniqueSkills);
     const cached = await fromCache(ck);
     if (cached) {
       logger.info(`[${name}] cache hit (${cached.length} jobs)`);
@@ -212,7 +218,7 @@ const runJobSearch = async (params, user, plan, onProgress) => {
     }
 
     // Enrich params with user profile so services can build better queries
-    const enrichedParams = { ...params, skills: uniqueSkills, experience };
+    const enrichedParams = { ...paramsForSearch, skills: uniqueSkills, experience };
 
     return SERVICES[name].search(enrichedParams)
       .then(async (jobs) => {

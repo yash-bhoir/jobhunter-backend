@@ -1,29 +1,38 @@
 const axios  = require('axios');
 const logger = require('../../config/logger');
 
-// Recruitee ATS — direct job listings from EU & global companies
-// Completely FREE — no API key required (public offers API)
+// Recruitee Careers Site API (no auth): GET https://{subdomain}.recruitee.com/api/offers
+// Docs: https://docs.recruitee.com/reference/intro-to-careers-site-api
+// Slugs must be refreshed — companies migrate off Recruitee or change subdomain often.
 
 const COMPANIES = [
-  // Verified active on Recruitee (checked April 2026)
-  'mollie', 'sendcloud', 'bynder', 'picnic', 'swapfiets',
-  'mews', 'productboard', 'apify', 'rossum', 'lokalise',
-  'printify', 'kiwi-com', 'rohlik', 'grammarly', 'preply',
-  'epam', 'devexperts', 'paxful', 'cossack-labs', 'mall-group',
+  // Verified returning JSON with `offers` (Apr 2026)
+  'bunq',
+  'personio',
+  'improvado',
+  'sendcloud',
 ];
+
+function titleMatchesRole(title, roleKeyword) {
+  if (!roleKeyword) return true;
+  const tokens = roleKeyword.toLowerCase().split(/\s+/).filter(t => t.length > 3);
+  if (!tokens.length) return true;
+  const t = (title || '').toLowerCase();
+  return tokens.some(tok => t.includes(tok));
+}
 
 const fetchCompany = async (company, roleKeyword) => {
   try {
-    const { data } = await axios.get(
-      `https://${company}.recruitee.com/api/offers/`,
-      { timeout: 8000 }
+    const { data, status } = await axios.get(
+      `https://${company}.recruitee.com/api/offers`,
+      { timeout: 8000, validateStatus: s => s < 500 },
     );
+    if (status === 404) return [];
 
     if (!data?.offers) return [];
 
-    const kw = (roleKeyword || '').toLowerCase();
     return data.offers
-      .filter(j => !kw || (j.title || '').toLowerCase().includes(kw))
+      .filter(j => titleMatchesRole(j.title, roleKeyword))
       .map(j => ({
         externalId:  String(j.id    || ''),
         title:       j.title        || '',
@@ -37,7 +46,11 @@ const fetchCompany = async (company, roleKeyword) => {
                      (j.location    || '').toLowerCase().includes('remote'),
         postedAt:    j.published_at || null,
       }));
-  } catch {
+  } catch (err) {
+    // 404 = company no longer on Recruitee; log other errors only
+    if (err.response?.status !== 404) {
+      logger.debug(`[recruitee] ${company}: ${err.response?.status ?? err.message}`);
+    }
     return [];
   }
 };

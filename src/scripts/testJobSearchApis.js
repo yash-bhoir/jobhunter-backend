@@ -42,7 +42,8 @@ const TEST_PARAMS = {
   experience: 2,
 };
 
-const PER_PLATFORM_MS = 60000;
+/** Apify + some ATS fetches can exceed 60s; keep bounded for CI. */
+const PER_PLATFORM_MS = Number(process.env.JOB_API_TEST_TIMEOUT_MS) || 200000;
 
 function missingEnv(keys) {
   return keys.filter((k) => !process.env[k] || String(process.env[k]).trim() === '');
