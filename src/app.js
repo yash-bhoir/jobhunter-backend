@@ -16,7 +16,18 @@ const logger                 = require('./config/logger');
 const app = express();
 
 // Security
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'none'"],
+      formAction: ["'none'"],
+    },
+  },
+}));
 app.use(cors({
   origin:      process.env.CLIENT_URL || 'http://localhost:3000',
   credentials: true,
@@ -56,6 +67,7 @@ app.use('/api', generalLimiter);
 app.get('/health', async (_req, res) => {
   const mongoose = require('mongoose');
   const os       = require('os');
+  const { isInMemoryMongoEnabled } = require('./config/database');
 
   // MongoDB
   const dbState  = mongoose.connection.readyState;
@@ -94,6 +106,8 @@ app.get('/health', async (_req, res) => {
     instance:  process.env.pm_id ?? 'standalone',
     uptime:    Math.round(process.uptime()),
     db:        dbStatus,
+    /** `ephemeral-memory` = dev:local / USE_IN_MEMORY_MONGO — not your Atlas data */
+    mongoBackend: isInMemoryMongoEnabled() ? 'ephemeral-memory' : 'persistent',
     redis:     redisStatus,
     queue:     queueStatus,
     memory: {

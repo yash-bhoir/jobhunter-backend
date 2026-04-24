@@ -1,10 +1,19 @@
 const axios  = require('axios');
 const GeoJob = require('../models/GeoJob');
 const Job    = require('../models/Job');
+const { buildTitleFilter } = require('../utils/geoJobQuery.util');
+const {
+  buildStoredMapJobs,
+  mergeStoredWithLive,
+} = require('../services/geo/storedGeoJobs.service');
+const { enrichOneJob, enrichBatchForUser } = require('../services/geo/jobGeoEnrichment.service');
+const { score } = require('../services/jobSearch/scorer');
+const { success } = require('../utils/response.util');
+const logger = require('../config/logger');
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-// Reverse geocode lat/lng → { city, countryCode } via Nominatim (free, no key)
+// Reverse geocode lat/lng → { city, state, countryCode } via Nominatim (free, no key)
 async function reverseGeocode(lat, lng) {
   try {
     const { data } = await axios.get('https://nominatim.openstreetmap.org/reverse', {
@@ -13,12 +22,209 @@ async function reverseGeocode(lat, lng) {
       timeout: 6000,
     });
     const addr = data?.address || {};
-    const city = addr.city || addr.town || addr.village || addr.county || addr.state || '';
+    const city =
+      addr.city || addr.town || addr.village || addr.municipality || addr.county || addr.state || '';
+    const state = addr.state || addr.region || '';
     const countryCode = (addr.country_code || 'in').toLowerCase().slice(0, 2);
-    return { city, countryCode };
+    return { city, state, countryCode };
   } catch {
-    return { city: '', countryCode: 'in' };
+    return { city: '', state: '', countryCode: 'in' };
   }
+}
+
+/** Normalized map-centre city → substrings that often appear on local job addresses (no broad state-only tokens). */
+const METRO_ADDRESS_ALIASES = {
+  mumbai: [
+    'mumbai', 'bombay', 'thane', 'navi mumbai', 'bkc', 'andheri', 'powai', 'bandra',
+    'kurla', 'vikroli', 'vikhroli', 'mira bhayandar', 'mira-bhayandar', 'vasai', 'virar',
+    'kalyan', 'dombivli', 'panvel', 'borivali', 'dadar', 'worli', 'malad', 'chembur',
+  ],
+  bengaluru: ['bengaluru', 'bangalore', 'electronic city', 'whitefield', 'koramangala'],
+  bangalore: ['bengaluru', 'bangalore', 'electronic city', 'whitefield', 'koramangala'],
+  delhi: ['delhi', 'new delhi', 'ncr', 'gurgaon', 'gurugram', 'noida', 'ghaziabad', 'faridabad'],
+  hyderabad: ['hyderabad', 'cyberabad', 'hitech city', 'gachibowli', 'secunderabad'],
+  chennai: ['chennai', 'ambattur', 'tambaram', 'omr', 'guindy'],
+  pune: [
+    'pune', 'hinjewadi', 'wakad', 'kharadi', 'viman nagar', 'hadapsar', 'pimpri', 'chinchwad',
+    'pcmc', 'aundh', 'baner', 'kothrud', 'magarpatta', 'bibvewadi', 'bavdhan', 'warje',
+    'undri', 'wagholi', 'lohegaon', 'yerwada', 'kalyani nagar', 'koregaon park',
+  ],
+  kolkata: ['kolkata', 'calcutta', 'salt lake', 'howrah'],
+  ahmedabad: ['ahmedabad', 'gandhinagar', 'sg highway'],
+};
+
+function metroTokensForHint(hint) {
+  const c = String(hint.city || '').toLowerCase().trim();
+  if (!c) return null;
+  if (METRO_ADDRESS_ALIASES[c]) return METRO_ADDRESS_ALIASES[c];
+  const norm = c.replace(/\s+/g, '');
+  if (METRO_ADDRESS_ALIASES[norm]) return METRO_ADDRESS_ALIASES[norm];
+  for (const key of Object.keys(METRO_ADDRESS_ALIASES)) {
+    if (c.includes(key) || key.includes(c)) return METRO_ADDRESS_ALIASES[key];
+  }
+  return null;
+}
+
+// Return a valid coord number, or null if unusable (0, NaN, Infinity, out-of-range).
+function parseCoord(v) {
+  const n = parseFloat(v);
+  return (Number.isFinite(n) && n !== 0) ? n : null;
+}
+
+/** Great-circle distance in km (for filtering API jobs whose real coords are far from the map centre). */
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+/** Regex + centroid for Indian cities named in addresses (pin vs text mismatch). */
+const INDIAN_CITY_GEO_HINTS = [
+  { re: /\bbengaluru\b|\bbangalore\b/i, lat: 12.9716, lng: 77.5946 },
+  { re: /\bhyderabad\b|\bhitech city\b|\bgachibowli\b/i, lat: 17.3850, lng: 78.4867 },
+  { re: /\bsecunderabad\b/i, lat: 17.4399, lng: 78.4983 },
+  { re: /\bchennai\b|\bambattur\b|\btambaram\b/i, lat: 13.0827, lng: 80.2707 },
+  { re: /\bmumbai\b|\bbombay\b|\bthane\b|\bnavi mumbai\b/i, lat: 19.0760, lng: 72.8777 },
+  { re: /\bpune\b|\bhinjewadi\b|\bwakad\b|\bkharadi\b/i, lat: 18.5204, lng: 73.8567 },
+  { re: /\bnoida\b/i, lat: 28.5355, lng: 77.3910 },
+  { re: /\bgurgaon\b|\bgurugram\b/i, lat: 28.4595, lng: 77.0266 },
+  { re: /\bnew delhi\b|\bdelhi\b/i, lat: 28.6139, lng: 77.2090 },
+  { re: /\bkolkata\b|\bcalcutta\b/i, lat: 22.5726, lng: 88.3639 },
+  { re: /\bahmedabad\b/i, lat: 23.0225, lng: 72.5714 },
+  { re: /\bjaipur\b/i, lat: 26.9124, lng: 75.7873 },
+  { re: /\bkochi\b|\bcochin\b/i, lat: 9.9312, lng: 76.2673 },
+];
+
+function mapOptsHasCenter(opts) {
+  if (!opts || typeof opts !== 'object') return false;
+  const { centerLat, centerLng, radiusKm } = opts;
+  return Number.isFinite(centerLat) && Number.isFinite(centerLng) && Number.isFinite(radiusKm) && radiusKm > 0;
+}
+
+function jobPinCoords(job) {
+  const c = job.location?.coordinates;
+  if (!Array.isArray(c) || c.length < 2) return { jobLat: null, jobLng: null };
+  const jobLng = c[0];
+  const jobLat = c[1];
+  if (!Number.isFinite(jobLat) || !Number.isFinite(jobLng)) return { jobLat: null, jobLng: null };
+  return { jobLat, jobLng };
+}
+
+/** Reverse-geocode centre is clearly Mumbai / Maharashtra (not match % — text from map pin). */
+function hintIsMumbaiMaharashtra(hint) {
+  const s = String(hint.state || '').toLowerCase();
+  if (s.includes('maharashtra')) return true;
+  const c = String(hint.city || '').toLowerCase();
+  if (c.includes('mumbai') || c.includes('thane') || c.includes('navi')) return true;
+  const m = METRO_ADDRESS_ALIASES.mumbai;
+  return !!(m && m.some((t) => t.length >= 3 && c.includes(t)));
+}
+
+function hintIsBangaloreKarnataka(hint) {
+  const s = String(hint.state || '').toLowerCase();
+  if (s.includes('karnataka')) return true;
+  const c = String(hint.city || '').toLowerCase();
+  if (c.includes('bangalore') || c.includes('bengaluru')) return true;
+  const b = METRO_ADDRESS_ALIASES.bengaluru || METRO_ADDRESS_ALIASES.bangalore;
+  return !!(b && b.some((t) => t.length >= 4 && c.includes(t)));
+}
+
+/**
+ * Address text names Karnataka / Bangalore without also naming a Maharashtra anchor
+ * (blocks “Bangalore role” rows that were pinned near Mumbai because APIs omitted coords).
+ */
+function addrClearlyKarnatakaOrBangalore(addrLower) {
+  const ka = /\bkarnataka\b/.test(addrLower);
+  const blr = /\b(bangalore|bengaluru)\b/i.test(addrLower);
+  if (!ka && !blr) return false;
+  const mhAnchor = /\b(mumbai|bombay|maharashtra|thane|navi\s*mumbai|andheri|bandra|powai|bkc)\b/i.test(addrLower);
+  return !mhAnchor;
+}
+
+/** Mumbai-area search but address is only Karnataka / Bangalore — wrong region. */
+function addrClearlyMaharashtraMumbaiOnly(addrLower) {
+  const mh = /\bmaharashtra\b/.test(addrLower);
+  const mu = /\b(mumbai|bombay|thane|navi\s*mumbai)\b/i.test(addrLower);
+  if (!mh && !mu) return false;
+  const kaAnchor = /\b(karnataka|bangalore|bengaluru|mysuru|mysore)\b/i.test(addrLower);
+  return !kaAnchor;
+}
+
+/**
+ * Address names a major city far from the map centre while the pin sits near the centre
+ * (typical when APIs lack coords and we jitter around the viewport).
+ */
+function addressCentroidConflictsWithPins(centerLat, centerLng, radiusKm, addrLower, jobLat, jobLng) {
+  if (!mapOptsHasCenter({ centerLat, centerLng, radiusKm }) || jobLat == null || jobLng == null) {
+    return false;
+  }
+  const r = Math.max(1, radiusKm);
+  const dJob = haversineKm(jobLat, jobLng, centerLat, centerLng);
+  if (dJob > r * 1.35 + 18) return false;
+
+  for (const { re, lat, lng } of INDIAN_CITY_GEO_HINTS) {
+    if (!re.test(addrLower)) continue;
+    const dCityFromCenter = haversineKm(lat, lng, centerLat, centerLng);
+    if (dCityFromCenter > r + 55) return true;
+  }
+  return false;
+}
+
+/**
+ * Jobs are geo-placed inside the radius (sometimes jittered). Address text can still name
+ * another city (e.g. Bangalore listings on a Mumbai map). Keep rows whose address matches
+ * the search centre's state/city/metro, or has no usable address (trust coordinates only).
+ *
+ * When reverse-geocode hint is empty (weak), do **not** allow every addressed job: require
+ * pin within radius and no address-vs-centroid conflict.
+ *
+ * @param {{ centerLat?: number, centerLng?: number, radiusKm?: number }} mapOpts
+ */
+function jobMatchesSearchArea(job, hint, mapOpts = {}) {
+  const { centerLat, centerLng, radiusKm } = mapOpts;
+  const { jobLat, jobLng } = jobPinCoords(job);
+
+  const raw = job.location?.address;
+  if (!raw || typeof raw !== 'string' || !String(raw).trim()) return true;
+
+  const addr = String(raw).toLowerCase();
+  if (mapOptsHasCenter(mapOpts) && jobLat != null && addressCentroidConflictsWithPins(
+    centerLat, centerLng, radiusKm, addr, jobLat, jobLng
+  )) {
+    return false;
+  }
+
+  const city = String(hint.city || '').toLowerCase().trim();
+  const state = String(hint.state || '').toLowerCase().trim();
+  const cc = String(hint.countryCode || '').toLowerCase().slice(0, 2);
+
+  if (cc === 'in') {
+    if (/\b(united states|u\.s\.a?\.?|usa|united kingdom|u\.k\.|canada|australia|germany|france)\b/i.test(addr)) {
+      return addr.includes('india');
+    }
+    if (hintIsMumbaiMaharashtra(hint) && addrClearlyKarnatakaOrBangalore(addr)) return false;
+    if (hintIsBangaloreKarnataka(hint) && addrClearlyMaharashtraMumbaiOnly(addr)) return false;
+  }
+
+  if (state.length >= 2 && addr.includes(state)) return true;
+  if (city.length >= 2 && addr.includes(city)) return true;
+
+  const metro = metroTokensForHint(hint);
+  if (metro && metro.some((t) => addr.includes(t))) return true;
+
+  if (state.length >= 2) return false;
+  if (city.length >= 2) return false;
+
+  // Weak / empty hint: require pin within radius (reverse geocode failed or returned nothing).
+  if (!mapOptsHasCenter(mapOpts) || jobLat == null) return false;
+  const d = haversineKm(jobLat, jobLng, centerLat, centerLng);
+  return d <= radiusKm * 1.22 + 12;
 }
 
 // Deterministic jitter — produces a value in [-range, +range].
@@ -37,27 +243,16 @@ function jitterCoord(seed, range) {
   return (((h >>> 0) / 0xffffffff) - 0.5) * 2 * range;
 }
 
-// Return a valid coord number, or null if unusable (0, NaN, Infinity, out-of-range).
-function parseCoord(v) {
-  const n = parseFloat(v);
-  return (Number.isFinite(n) && n !== 0) ? n : null;
-}
-
-// Build a MongoDB title filter that matches individual key tech terms (OR logic)
-// so "mern stack developer" matches "MERN Stack Engineer", "Full Stack MERN Developer", etc.
-// Generic words are skipped so they don't produce noise matches.
-const GENERIC_WORDS = new Set([
-  'developer','engineer','senior','junior','lead','manager','associate','intern',
-  'staff','principal','head','director','vp','cto','coo','and','the','for','with',
-  'jobs','role','position','level','remote','full','part','time','contract','hybrid',
-  'entry','mid','experienced','fresher','graduate','trainee',
-]);
-
-function buildTitleFilter(raw) {
-  const terms = raw.trim().toLowerCase().split(/[\s,/|&()+]+/)
-    .filter(w => w.length > 2 && !GENERIC_WORDS.has(w));
-  const pattern = terms.length > 0 ? terms.join('|') : raw.trim();
-  return { $regex: pattern, $options: 'i' };
+/** Flatten GeoJSON / string location + remote flags for the shared job scorer. */
+function normalizeMapJobForScorer(job) {
+  const loc = job.location;
+  const address = typeof loc === 'string'
+    ? loc
+    : (loc && typeof loc === 'object' ? String(loc.address || '') : '');
+  const remote = job.remote === true
+    || job.workMode === 'remote'
+    || job.jobType === 'remote';
+  return { ...job, location: address, remote };
 }
 
 // How far (degrees) to spread markers away from their base coordinate.
@@ -109,6 +304,10 @@ async function fetchAdzunaGeoJobs(what, where, countryCode, centerLat, centerLng
   return (data?.results || []).map(j => {
     const rawLat = parseCoord(j.latitude);
     const rawLng = parseCoord(j.longitude);
+    if (rawLat !== null && rawLng !== null) {
+      const d = haversineKm(rawLat, rawLng, centerLat, centerLng);
+      if (d > radiusKm * 1.25) return null;
+    }
     // Base: real city-level coord (if valid) or search centre
     const baseLat = rawLat ?? centerLat;
     const baseLng = rawLng ?? centerLng;
@@ -140,7 +339,7 @@ async function fetchAdzunaGeoJobs(what, where, countryCode, centerLat, centerLng
       postedAt:      j.created ? new Date(j.created) : new Date(),
       expiresAt,
     };
-  });
+  }).filter(Boolean);
 }
 
 async function fetchJSearchGeoJobs(what, where, centerLat, centerLng, radiusKm, expiresAt) {
@@ -160,6 +359,10 @@ async function fetchJSearchGeoJobs(what, where, centerLat, centerLng, radiusKm, 
   return (data?.data || []).map(j => {
     const rawLat = parseCoord(j.job_latitude);
     const rawLng = parseCoord(j.job_longitude);
+    if (rawLat !== null && rawLng !== null) {
+      const d = haversineKm(rawLat, rawLng, centerLat, centerLng);
+      if (d > radiusKm * 1.25) return null;
+    }
     const baseLat = rawLat ?? centerLat;
     const baseLng = rawLng ?? centerLng;
     const range = spreadRange(radiusKm, rawLat !== null);
@@ -188,7 +391,7 @@ async function fetchJSearchGeoJobs(what, where, centerLat, centerLng, radiusKm, 
       postedAt:      j.job_posted_at_datetime_utc ? new Date(j.job_posted_at_datetime_utc) : new Date(),
       expiresAt,
     };
-  });
+  }).filter(Boolean);
 }
 
 async function fetchSerpApiGeoJobs(what, where, centerLat, centerLng, radiusKm, expiresAt) {
@@ -232,11 +435,13 @@ async function fetchSerpApiGeoJobs(what, where, centerLat, centerLng, radiusKm, 
 }
 
 // Fetch from all APIs and upsert into GeoJob collection (24 h TTL cache)
-async function fetchAndCacheRealJobs(lat, lng, titleQuery, radiusKm) {
-  const { city, countryCode } = await reverseGeocode(lat, lng);
+async function fetchAndCacheRealJobs(lat, lng, titleQuery, radiusKm, geoHint = null) {
+  const hint = geoHint || await reverseGeocode(lat, lng);
+  const city        = hint.city || '';
+  const countryCode = (hint.countryCode || 'in').toLowerCase().slice(0, 2);
 
-  const what      = titleQuery?.trim() || '';
-  const where     = city;
+  const what  = titleQuery?.trim() || '';
+  const where = city;
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
   const [adzunaResult, jsearchResult, serpResult] = await Promise.allSettled([
@@ -265,212 +470,38 @@ async function fetchAndCacheRealJobs(lat, lng, titleQuery, radiusKm) {
   );
 }
 
-// ── Seed data — 20 real-looking jobs around London ─────────────────
-const SEED_JOBS = [
-  {
-    title: 'Senior React Developer',
-    company: 'Monzo',
-    location: { type: 'Point', coordinates: [-0.0756, 51.5248], address: 'Shoreditch, London' },
-    salary: 95000, salaryDisplay: '£95K/yr',
-    jobType: 'hybrid',
-    tags: ['React', 'TypeScript', 'GraphQL'],
-    description: 'Build next-gen banking features for millions of users. Own the frontend architecture across the consumer app.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Data Engineer',
-    company: 'HSBC',
-    location: { type: 'Point', coordinates: [0.0195, 51.5054], address: 'Canary Wharf, London' },
-    salary: 85000, salaryDisplay: '£85K/yr',
-    jobType: 'full-time',
-    tags: ['Python', 'Apache Spark', 'AWS'],
-    description: 'Design and build large-scale data pipelines for global banking analytics.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Backend Engineer',
-    company: 'Revolut',
-    location: { type: 'Point', coordinates: [-0.0924, 51.5126], address: 'City of London' },
-    salary: 110000, salaryDisplay: '£110K/yr',
-    jobType: 'remote',
-    tags: ['Kotlin', 'Microservices', 'Kafka'],
-    description: 'Scale payment infrastructure to handle billions of transactions per month.',
-    applyUrl: '#',
-  },
-  {
-    title: 'UX Designer',
-    company: 'DeepMind',
-    location: { type: 'Point', coordinates: [-0.1337, 51.5136], address: 'Soho, London' },
-    salary: 90000, salaryDisplay: '£90K/yr',
-    jobType: 'hybrid',
-    tags: ['Figma', 'Design Systems', 'User Research'],
-    description: 'Shape the human side of cutting-edge AI research tools used by world-class scientists.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Product Manager',
-    company: 'Deliveroo',
-    location: { type: 'Point', coordinates: [-0.1430, 51.5390], address: 'Camden, London' },
-    salary: 105000, salaryDisplay: '£105K/yr',
-    jobType: 'full-time',
-    tags: ['Agile', 'B2C', 'Growth'],
-    description: 'Own the rider experience product from ideation through to launch.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Machine Learning Engineer',
-    company: 'DeepMind',
-    location: { type: 'Point', coordinates: [-0.1921, 51.5000], address: 'Kensington, London' },
-    salary: 130000, salaryDisplay: '£130K/yr',
-    jobType: 'full-time',
-    tags: ['Python', 'PyTorch', 'TensorFlow'],
-    description: 'Develop state-of-the-art ML models for real-world healthcare and science impact.',
-    applyUrl: '#',
-  },
-  {
-    title: 'DevOps Engineer',
-    company: 'Wise',
-    location: { type: 'Point', coordinates: [-0.0873, 51.5047], address: 'London Bridge' },
-    salary: 88000, salaryDisplay: '£88K/yr',
-    jobType: 'hybrid',
-    tags: ['Kubernetes', 'Terraform', 'GCP'],
-    description: 'Build and maintain infrastructure powering global money transfers at scale.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Frontend Engineer',
-    company: 'Bulb Energy',
-    location: { type: 'Point', coordinates: [-0.0550, 51.5438], address: 'Hackney, London' },
-    salary: 80000, salaryDisplay: '£80K/yr',
-    jobType: 'remote',
-    tags: ['Vue.js', 'TypeScript', 'Tailwind CSS'],
-    description: 'Build clean energy management tools that help consumers reduce their carbon footprint.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Cloud Architect',
-    company: 'BT Group',
-    location: { type: 'Point', coordinates: [0.0028, 51.5422], address: 'Stratford, London' },
-    salary: 125000, salaryDisplay: '£125K/yr',
-    jobType: 'full-time',
-    tags: ['AWS', 'Azure', 'Cloud Architecture'],
-    description: 'Lead large-scale cloud migration strategy for enterprise-level infrastructure.',
-    applyUrl: '#',
-  },
-  {
-    title: 'iOS Developer',
-    company: 'Farfetch',
-    location: { type: 'Point', coordinates: [-0.2051, 51.5130], address: 'Notting Hill, London' },
-    salary: 92000, salaryDisplay: '£92K/yr',
-    jobType: 'hybrid',
-    tags: ['Swift', 'SwiftUI', 'UIKit'],
-    description: 'Craft luxury fashion discovery experiences for millions of iOS users worldwide.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Data Scientist',
-    company: 'GoCardless',
-    location: { type: 'Point', coordinates: [0.0090, 51.4834], address: 'Greenwich, London' },
-    salary: 87000, salaryDisplay: '£87K/yr',
-    jobType: 'hybrid',
-    tags: ['Python', 'SQL', 'Statistics'],
-    description: 'Model payment failure and fraud detection patterns using advanced statistical methods.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Android Developer',
-    company: 'Bumble',
-    location: { type: 'Point', coordinates: [-0.3010, 51.4613], address: 'Richmond, London' },
-    salary: 88000, salaryDisplay: '£88K/yr',
-    jobType: 'remote',
-    tags: ['Kotlin', 'Jetpack Compose', 'MVVM'],
-    description: 'Build features that help people make meaningful connections on Android.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Full Stack Engineer',
-    company: 'OakNorth',
-    location: { type: 'Point', coordinates: [-0.1133, 51.4613], address: 'Brixton, London' },
-    salary: 95000, salaryDisplay: '£95K/yr',
-    jobType: 'full-time',
-    tags: ['Node.js', 'React', 'PostgreSQL'],
-    description: 'Build intelligent banking tools that help entrepreneurs grow their businesses.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Security Engineer',
-    company: 'Palantir',
-    location: { type: 'Point', coordinates: [-0.2240, 51.4934], address: 'Hammersmith, London' },
-    salary: 120000, salaryDisplay: '£120K/yr',
-    jobType: 'full-time',
-    tags: ['AppSec', 'Zero Trust', 'SIEM'],
-    description: 'Secure mission-critical data analytics platforms used by governments and enterprises.',
-    applyUrl: '#',
-  },
-  {
-    title: 'QA Automation Engineer',
-    company: 'Sky',
-    location: { type: 'Point', coordinates: [-0.2979, 51.5560], address: 'Wembley, London' },
-    salary: 65000, salaryDisplay: '£65K/yr',
-    jobType: 'hybrid',
-    tags: ['Cypress', 'Playwright', 'Automation'],
-    description: 'Ensure quality across streaming and broadcast platforms used by millions daily.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Engineering Manager',
-    company: 'Experian',
-    location: { type: 'Point', coordinates: [-0.1420, 51.5154], address: 'Oxford Circus, London' },
-    salary: 140000, salaryDisplay: '£140K/yr',
-    jobType: 'full-time',
-    tags: ['Leadership', 'Fintech', 'Agile'],
-    description: 'Lead a team of 8 engineers building credit decisioning tools used by millions.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Blockchain Developer',
-    company: 'ConsenSys',
-    location: { type: 'Point', coordinates: [-0.1425, 51.4963], address: 'Victoria, London' },
-    salary: 115000, salaryDisplay: '£115K/yr',
-    jobType: 'remote',
-    tags: ['Solidity', 'Ethereum', 'Web3.js'],
-    description: 'Build decentralised applications on Ethereum for the next generation of finance.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Site Reliability Engineer',
-    company: 'Funding Circle',
-    location: { type: 'Point', coordinates: [-0.1010, 51.4958], address: 'Elephant & Castle, London' },
-    salary: 100000, salaryDisplay: '£100K/yr',
-    jobType: 'hybrid',
-    tags: ['SRE', 'Prometheus', 'Go'],
-    description: 'Improve reliability, observability and incident response for our lending platform.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Senior Product Designer',
-    company: 'Airtable',
-    location: { type: 'Point', coordinates: [-0.1246, 51.4855], address: 'Vauxhall, London' },
-    salary: 98000, salaryDisplay: '£98K/yr',
-    jobType: 'hybrid',
-    tags: ['Figma', 'Product Design', 'B2B SaaS'],
-    description: 'Redesign collaboration experiences for knowledge workers and enterprise teams.',
-    applyUrl: '#',
-  },
-  {
-    title: 'Marketing Data Analyst',
-    company: 'Zalando',
-    location: { type: 'Point', coordinates: [-0.0921, 51.5016], address: 'Borough, London' },
-    salary: 72000, salaryDisplay: '£72K/yr',
-    jobType: 'full-time',
-    tags: ['SQL', 'Tableau', 'A/B Testing'],
-    description: 'Optimise digital marketing spend and attribution across European e-commerce markets.',
-    applyUrl: '#',
-  },
-];
+/** Cached map rows must come from configured job APIs with a real apply link (no demo/placeholder). */
+const GEOJOB_REAL_LISTING_FILTER = {
+  externalId: { $regex: /^(adzuna_|jsearch_|serpapi_)/i },
+  applyUrl:   { $exists: true, $nin: [null, '', '#'] },
+};
+
+function hasRealApplyUrl(job) {
+  const u = String(job.applyUrl || '').trim();
+  return u.length > 0 && u !== '#';
+}
+
+/**
+ * DB-backed rows: trust coordinates when there is no address text; otherwise same region rules as APIs
+ * (avoids Bangalore-titled jobs appearing on a Mumbai map when geo was enriched to the viewport).
+ */
+function passesMapListingFilters(job, geoHint, mapOpts = {}) {
+  if (String(job.applyUrl || '').trim() === '#') return false;
+  const raw = job.location?.address;
+  const hasAddr = !!(raw && String(raw).trim());
+  if (job._canonicalMapJob && !hasAddr) return true;
+  if (!job._canonicalMapJob && !hasRealApplyUrl(job)) return false;
+  return jobMatchesSearchArea(job, geoHint, mapOpts);
+}
+
+// GET /geo-jobs/nearby — env tunables:
+// GEO_NEARBY_BG_ENRICH_LIMIT (default 25), GEO_NEARBY_LOG_METRICS=1,
+// GEO_NEARBY_LIVE_LIMIT (default 250) — max cached API jobs per response,
+// GEO_NEARBY_SKIP_LIVE_FETCH=1 — opt out of calling external job APIs (default: always fetch).
 
 // ── GET /api/v1/geo-jobs/nearby ─────────────────────────────────────
 const getNearbyJobs = async (req, res, next) => {
+  const t0 = Date.now();
   try {
     const { lat, lng, radius = 10, title } = req.query;
 
@@ -486,9 +517,56 @@ const getNearbyJobs = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid lat/lng values' });
     }
 
+    const geoHint = await reverseGeocode(parsedLat, parsedLng);
+    const searchAreaLabel = [geoHint.city, geoHint.state].filter(Boolean).join(', ')
+      .trim()
+      || (geoHint.countryCode ? geoHint.countryCode.toUpperCase() : '');
+    const searchCtx = {
+      searchRole:     title?.trim() || '',
+      searchLocation: [geoHint.city, geoHint.state, geoHint.countryCode].filter(Boolean).join(', ').trim(),
+      searchWorkType: 'any',
+    };
+
+    const userId       = req.user._id;
     const radiusMeters = parsedRadius * 1000;
 
-    // $geoWithin works with countDocuments; $near does not (it requires sort)
+    const liveLimit = Math.min(
+      500,
+      Math.max(50, parseInt(process.env.GEO_NEARBY_LIVE_LIMIT || '250', 10) || 250)
+    );
+
+    const bgEnrichLimit = Math.min(
+      200,
+      Math.max(1, parseInt(process.env.GEO_NEARBY_BG_ENRICH_LIMIT || '25', 10) || 25)
+    );
+
+    // Background: remote jobs missing geo → low-confidence coords around this viewport centre.
+    setImmediate(async () => {
+      try {
+        const pending = await Job.find({
+          userId,
+          remote:      true,
+          geoAttempts: { $lt: 3 },
+          $or: [
+            { geo: { $exists: false } },
+            { geo: null },
+            { 'geo.coordinates': { $exists: false } },
+          ],
+        }).limit(bgEnrichLimit).select('_id').lean();
+        for (const p of pending) {
+          await enrichOneJob(p._id, { centerLat: parsedLat, centerLng: parsedLng }).catch(() => {});
+        }
+      } catch (_) { /* ignore */ }
+    });
+
+    const { storedNorm } = await buildStoredMapJobs(
+      userId,
+      parsedLat,
+      parsedLng,
+      parsedRadius,
+      title
+    );
+
     const withinQuery = {
       location: {
         $geoWithin: {
@@ -497,12 +575,6 @@ const getNearbyJobs = async (req, res, next) => {
       },
     };
 
-    // Count matching jobs — include title filter so we re-fetch for each new role search
-    const countQuery = { ...withinQuery };
-    if (title?.trim()) countQuery.title = buildTitleFilter(title.trim());
-    const cachedCount = await GeoJob.countDocuments(countQuery);
-
-    // $near query used only for the final find (sorted by distance)
     const baseGeoQuery = {
       location: {
         $near: {
@@ -512,64 +584,176 @@ const getNearbyJobs = async (req, res, next) => {
       },
     };
 
-    if (cachedCount < 5) {
-      // Not enough matching cached results — fetch from real APIs
+    const skipLiveFetch = process.env.GEO_NEARBY_SKIP_LIVE_FETCH === '1';
+    let liveFetchError = null;
+    if (!skipLiveFetch) {
       try {
-        await fetchAndCacheRealJobs(parsedLat, parsedLng, title, parsedRadius);
+        await fetchAndCacheRealJobs(parsedLat, parsedLng, title, parsedRadius, geoHint);
       } catch (fetchErr) {
-        console.error('[GeoJobs] fetchAndCacheRealJobs error:', fetchErr.message);
+        liveFetchError = fetchErr.message;
+        logger.warn(`[GeoJobs] fetchAndCacheRealJobs: ${fetchErr.message}`);
       }
     }
 
-    // Final query — smart OR-based title filter (not exact phrase)
-    const finalQuery = { ...baseGeoQuery };
+    const geoCacheBase = { ...withinQuery, ...GEOJOB_REAL_LISTING_FILTER };
+    const geoJobsInRadiusAllTitles = await GeoJob.countDocuments(geoCacheBase);
+    const titleTrim = title?.trim() || '';
+    const titleBuilt = titleTrim ? buildTitleFilter(titleTrim) : null;
+    const countQueryTitled = titleBuilt ? { ...geoCacheBase, title: titleBuilt } : geoCacheBase;
+    const cachedCount = titleBuilt
+      ? await GeoJob.countDocuments(countQueryTitled)
+      : geoJobsInRadiusAllTitles;
+
+    const liveNearBase = { ...baseGeoQuery, ...GEOJOB_REAL_LISTING_FILTER };
+    const liveGeoJobsInRadiusTotal = await GeoJob.countDocuments(liveNearBase);
+
+    const finalQuery = { ...baseGeoQuery, ...GEOJOB_REAL_LISTING_FILTER };
     if (title?.trim()) {
       finalQuery.title = buildTitleFilter(title.trim());
     }
 
-    let jobs = await GeoJob.find(finalQuery).limit(100).lean();
+    let liveJobs = await GeoJob.find(finalQuery).limit(liveLimit).lean();
+    if (liveJobs.length === 0 && title?.trim()) {
+      liveJobs = await GeoJob.find({ ...baseGeoQuery, ...GEOJOB_REAL_LISTING_FILTER }).limit(liveLimit).lean();
+    }
 
-    // Fallback: if title filter returns nothing, show all area jobs so map isn't empty
-    if (jobs.length === 0 && title?.trim()) {
-      jobs = await GeoJob.find(baseGeoQuery).limit(100).lean();
+    const mergedRaw = mergeStoredWithLive(storedNorm, liveJobs);
+    let merged;
+    try {
+      const forScoring = mergedRaw.map(normalizeMapJobForScorer);
+      const scored = score(forScoring, req.user, searchCtx);
+      if (!Array.isArray(scored) || scored.length !== mergedRaw.length) {
+        throw new Error('scorer output length mismatch');
+      }
+      merged = scored
+        .map((sj, i) => ({
+          ...mergedRaw[i],
+          matchScore: sj.matchScore ?? mergedRaw[i].matchScore ?? 0,
+        }))
+        .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+    } catch (e) {
+      logger.warn(`[GeoJobs] match scoring skipped: ${e.message}`);
+      merged = mergedRaw
+        .map((j) => ({ ...j, matchScore: j.matchScore ?? 0 }))
+        .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+    }
+
+    const mapFilterOpts = {
+      centerLat: parsedLat,
+      centerLng: parsedLng,
+      radiusKm:  parsedRadius,
+    };
+    const mergedBeforeListingFilter = merged.length;
+    merged = merged.filter((j) => passesMapListingFilters(j, geoHint, mapFilterOpts));
+    const mapListingFilterRemoved = mergedBeforeListingFilter - merged.length;
+
+    const durationMs = Date.now() - t0;
+
+    if (process.env.GEO_NEARBY_LOG_METRICS === '1') {
+      logger.info(
+        `[geo-jobs/nearby] ${JSON.stringify({
+          durationMs,
+          stored: storedNorm.length,
+          live: liveJobs.length,
+          liveGeoJobsInRadiusTotal,
+          geoJobsInRadiusAllTitles,
+          cachedTitleMatch: cachedCount,
+          mergedBeforeListingFilter,
+          mergedAfterListingFilter: merged.length,
+          mapListingFilterRemoved,
+          liveFetchSkipped: skipLiveFetch,
+          liveFetchError,
+          radiusKm: parsedRadius,
+        })}`
+      );
+    } else {
+      logger.debug(
+        `[geo-jobs/nearby] ${JSON.stringify({
+          durationMs,
+          stored: storedNorm.length,
+          live: liveJobs.length,
+          merged: merged.length,
+          liveFetchSkipped: skipLiveFetch,
+        })}`
+      );
     }
 
     return res.json({
       success: true,
-      data: { jobs, total: jobs.length },
+      data: {
+        jobs:  merged,
+        total: merged.length,
+        meta: {
+          stored:            storedNorm.length,
+          live:              liveJobs.length,
+          merged:            merged.length,
+          liveFetchSkipped:  skipLiveFetch,
+          liveFetchError:    liveFetchError || undefined,
+          /** GeoJob docs in DB inside radius (real listings only). */
+          cachedGeoInRadius: cachedCount,
+          /** Same circle, ignoring job-title text filter — shows if title regex is the bottleneck. */
+          geoJobsInRadiusAllTitles,
+          /** GeoJob docs matching $near + filters (uncapped count; live array is capped by liveLimit). */
+          liveGeoJobsInRadiusTotal,
+          /** Rows after merge + score, before address/region listing filter. */
+          mergedBeforeMapListingFilter: mergedBeforeListingFilter,
+          /** Removed by passesMapListingFilters (wrong city in address vs map centre, etc.). */
+          mapListingFilterRemoved,
+          titleQuery:        titleTrim || undefined,
+          titleMongoPattern: titleBuilt && titleBuilt.$regex != null
+            ? String(titleBuilt.$regex)
+            : undefined,
+          searchAreaLabel,
+          durationMs,
+          /** Echo request params so the client can keep the radius ring aligned with the result set. */
+          centerLat:  parsedLat,
+          centerLng:  parsedLng,
+          radiusKm:   parsedRadius,
+        },
+      },
     });
   } catch (err) {
     next(err);
   }
 };
 
-// ── POST /api/v1/geo-jobs/seed  (idempotent) ─────────────────────
-const seedGeoJobs = async (req, res, next) => {
+// ── POST /api/v1/geo-jobs/enrich-stored ───────────────────────────
+const enrichStoredJobs = async (req, res, next) => {
   try {
-    const existing = await GeoJob.countDocuments();
-    if (existing > 0) {
-      return res.json({
-        success: true,
-        message: `Already seeded — ${existing} geo jobs exist`,
-        data: { count: existing },
-      });
-    }
-
-    const created = await GeoJob.insertMany(SEED_JOBS);
-
-    return res.status(201).json({
-      success: true,
-      message: `Seeded ${created.length} geo jobs`,
-      data: { count: created.length },
-    });
+    const limit = Math.min(Math.max(parseInt(req.body?.limit ?? 40, 10) || 40, 1), 200);
+    const centerLat = parseFloat(req.body?.centerLat);
+    const centerLng = parseFloat(req.body?.centerLng);
+    const centerOpts =
+      Number.isFinite(centerLat) && Number.isFinite(centerLng)
+        ? { centerLat, centerLng }
+        : {};
+    const result = await enrichBatchForUser(req.user._id, limit, centerOpts);
+    return success(res, result, 'Geo enrichment batch completed');
   } catch (err) {
     next(err);
   }
 };
+
+// ── POST /api/v1/geo-jobs/seed  (disabled — no demo data in production) ──
+const seedGeoJobs = async (_req, res) => res.status(410).json({
+  success: false,
+  message:
+    'Demo geo seed is disabled. Map jobs are only your real saved jobs (with coordinates) plus live listings from Adzuna, JSearch, and SerpAPI when API keys are configured.',
+});
 
 // ── POST /api/v1/geo-jobs/:id/save ───────────────────────────────
 const saveGeoJob = async (req, res, next) => {
   try {
+    // Canonical Job id (same collection as list search) — bookmark without geo_ shim.
+    const canonical = await Job.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user._id },
+      { $set: { status: 'saved', statusUpdatedAt: new Date() } },
+      { new: true }
+    );
+    if (canonical) {
+      return res.json({ success: true, data: canonical, message: 'Job saved' });
+    }
+
     const geoJob = await GeoJob.findById(req.params.id).lean();
     if (!geoJob) {
       return res.status(404).json({ success: false, message: 'Job not found' });
@@ -612,6 +796,15 @@ const saveGeoJob = async (req, res, next) => {
 // ── POST /api/v1/geo-jobs/:id/unsave ─────────────────────────────
 const unsaveGeoJob = async (req, res, next) => {
   try {
+    const canonical = await Job.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user._id, status: 'saved' },
+      { $set: { status: 'found', statusUpdatedAt: new Date() } },
+      { new: true }
+    );
+    if (canonical) {
+      return res.json({ success: true, data: canonical, message: 'Job unsaved' });
+    }
+
     const externalId = `geo_${req.params.id}`;
 
     const job = await Job.findOneAndUpdate(
@@ -629,18 +822,34 @@ const unsaveGeoJob = async (req, res, next) => {
 // ── GET /api/v1/geo-jobs/saved-ids ───────────────────────────────
 const getSavedGeoJobIds = async (req, res, next) => {
   try {
-    const jobs = await Job.find({
+    const geoLinked = await Job.find({
       userId:     req.user._id,
       source:     'map-search',
       status:     'saved',
       externalId: { $regex: /^geo_/ },
     }).select('externalId _id').lean();
 
-    const ids = jobs.map(j => j.externalId.replace('geo_', ''));
+    const canonicalSaved = await Job.find({
+      userId: req.user._id,
+      status: 'saved',
+      $expr: {
+        $not: {
+          $regexMatch: { input: { $ifNull: ['$externalId', ''] }, regex: '^geo_' },
+        },
+      },
+    }).select('_id').lean();
+
+    const ids = [...new Set([
+      ...geoLinked.map(j => j.externalId.replace('geo_', '')),
+      ...canonicalSaved.map(j => String(j._id)),
+    ])];
 
     const docIdMap = {};
-    jobs.forEach(j => {
+    geoLinked.forEach(j => {
       docIdMap[j.externalId.replace('geo_', '')] = j._id.toString();
+    });
+    canonicalSaved.forEach(j => {
+      docIdMap[String(j._id)] = j._id.toString();
     });
 
     return res.json({ success: true, data: { ids, docIdMap } });
@@ -649,4 +858,11 @@ const getSavedGeoJobIds = async (req, res, next) => {
   }
 };
 
-module.exports = { getNearbyJobs, seedGeoJobs, saveGeoJob, unsaveGeoJob, getSavedGeoJobIds };
+module.exports = {
+  getNearbyJobs,
+  seedGeoJobs,
+  saveGeoJob,
+  unsaveGeoJob,
+  getSavedGeoJobIds,
+  enrichStoredJobs,
+};

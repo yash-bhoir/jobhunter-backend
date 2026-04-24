@@ -1,28 +1,84 @@
+const dns      = require('dns');
 const mongoose = require('mongoose');
 const logger   = require('./logger');
 const { migrateResumeItemsPdfBuffer } = require('../migrations/migrateResumeItemsPdfBuffer');
 
-const connectDB = async () => {
-  if (!process.env.MONGODB_URI || String(process.env.MONGODB_URI).trim() === '') {
+let memoryMongo = null;
+
+function useInMemoryMongo() {
+  if (process.env.NODE_ENV === 'production') return false;
+  return ['1', 'true', 'yes'].includes(String(process.env.USE_IN_MEMORY_MONGO || '').toLowerCase());
+}
+
+async function stopDevMemoryMongo() {
+  if (!memoryMongo) return;
+  try {
+    await memoryMongo.stop();
+    logger.info('[MongoDB] In-memory server stopped');
+  } catch (e) {
+    logger.warn('[MongoDB] In-memory stop:', e.message);
+  }
+  memoryMongo = null;
+}
+
+async function startDevMemoryMongo() {
+  let MongoMemoryServer;
+  try {
+    ({ MongoMemoryServer } = require('mongodb-memory-server'));
+  } catch {
     throw new Error(
-      'MONGODB_URI is missing. On Render: Web Service → Environment → add MONGODB_URI (MongoDB Atlas connection string).',
+      'USE_IN_MEMORY_MONGO is set but mongodb-memory-server is missing. From jobhunter-backend run: npm install',
     );
   }
-  const conn = await mongoose.connect(process.env.MONGODB_URI, {
-    // Pool: 1 connection per expected concurrent request (scale with instance count)
-    maxPoolSize:               100,
-    minPoolSize:               10,
-    // Timeouts
+  memoryMongo = await MongoMemoryServer.create({
+    instance: { dbName: 'job_search_db' },
+  });
+  return memoryMongo.getUri();
+}
+
+function applyMongoDnsServersFromEnv() {
+  const raw = String(process.env.MONGODB_DNS_SERVERS || '').trim();
+  if (!raw) return;
+  const servers = raw.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  if (!servers.length) return;
+  try {
+    dns.setServers(servers);
+    logger.info(`[MongoDB] DNS servers for SRV lookup: ${servers.join(', ')}`);
+  } catch (e) {
+    logger.warn('[MongoDB] MONGODB_DNS_SERVERS ignored:', e.message);
+  }
+}
+
+const connectDB = async () => {
+  applyMongoDnsServersFromEnv();
+
+  let uri;
+  if (useInMemoryMongo()) {
+    uri = await startDevMemoryMongo();
+    logger.warn(
+      '[MongoDB] In-memory database (USE_IN_MEMORY_MONGO). Data is lost when the server stops. For production use MONGODB_URI only.',
+    );
+  } else {
+    if (!process.env.MONGODB_URI || String(process.env.MONGODB_URI).trim() === '') {
+      throw new Error(
+        'MONGODB_URI is missing. Fix Atlas/local Mongo, or run: npm run dev:local (see jobhunter-backend package.json).',
+      );
+    }
+    uri = String(process.env.MONGODB_URI).trim();
+  }
+
+  const pool = memoryMongo ? { maxPoolSize: 20, minPoolSize: 1 } : { maxPoolSize: 100, minPoolSize: 10 };
+  const conn = await mongoose.connect(uri, {
+    ...pool,
     serverSelectionTimeoutMS:  10000,
     socketTimeoutMS:           45000,
     connectTimeoutMS:          10000,
-    // Heartbeat so idle connections are kept warm
     heartbeatFrequencyMS:      10000,
-    // Auto-reconnect
     maxConnecting:             10,
   });
 
-  logger.info(`MongoDB connected: ${conn.connection.host} (pool 10→100)`);
+  const hostLabel = memoryMongo ? 'in-memory (dev)' : conn.connection.host;
+  logger.info(`MongoDB connected: ${hostLabel}${memoryMongo ? '' : ' (pool 10→100)'}`);
 
   try {
     await migrateResumeItemsPdfBuffer();
@@ -35,4 +91,8 @@ const connectDB = async () => {
   mongoose.connection.on('reconnected',  ()    => logger.info ('MongoDB reconnected'));
 };
 
-module.exports = { connectDB };
+function isInMemoryMongoEnabled() {
+  return !!memoryMongo;
+}
+
+module.exports = { connectDB, stopDevMemoryMongo, isInMemoryMongoEnabled };

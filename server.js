@@ -16,7 +16,7 @@ process.on('unhandledRejection', (reason) => {
 
 const http   = require('http');
 const app    = require('./src/app');
-const { connectDB }        = require('./src/config/database');
+const { connectDB, stopDevMemoryMongo } = require('./src/config/database');
 const { connectRedis }     = require('./src/config/redis');
 const { initSocket }       = require('./src/config/socket');
 const { initQueues, startEmailWorker, closeQueues } = require('./src/config/queue');
@@ -114,6 +114,7 @@ async function startServer() {
           await closeQueues();
           const mongoose = require('mongoose');
           await mongoose.connection.close();
+          await stopDevMemoryMongo();
           const { getRedis, getPubClient, getSubClient } = require('./src/config/redis');
           await Promise.allSettled([
             getRedis()?.quit(),
@@ -139,7 +140,9 @@ async function startServer() {
     process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
   } catch (err) {
-    logger.error('Startup failed:', err.message);
+    const msg = err?.message || String(err);
+    logger.error(`Startup failed: ${msg}`);
+    if (err?.stack) logger.error(err.stack);
     process.exit(1);
   }
 }

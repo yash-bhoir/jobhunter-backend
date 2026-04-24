@@ -1,26 +1,5 @@
-const fs   = require('fs');
-const path = require('path');
 const { success } = require('../../utils/response.util');
 const AdminAuditLog = require('../../models/AdminAuditLog');
-
-const ENV_PATH = path.resolve(__dirname, '../../../.env');
-
-// Read .env, update or insert a key, write back
-const persistToEnvFile = (key, value) => {
-  try {
-    let content = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8') : '';
-    const regex = new RegExp(`^${key}=.*$`, 'm');
-    if (regex.test(content)) {
-      content = content.replace(regex, `${key}=${value}`);
-    } else {
-      content = content.trimEnd() + `\n${key}=${value}\n`;
-    }
-    fs.writeFileSync(ENV_PATH, content, 'utf8');
-  } catch (err) {
-    // Non-fatal — key is still set in process.env for this session
-    console.warn(`[apikeys] Could not write to .env: ${err.message}`);
-  }
-};
 
 const API_KEYS = [
   // ── Existing search platforms ────────────────────────────────────
@@ -127,10 +106,12 @@ exports.update = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Unknown API key' });
     }
 
+    if (typeof value !== 'string' || value.length === 0 || value.length > 512) {
+      return res.status(400).json({ success: false, message: 'Value must be a non-empty string up to 512 characters' });
+    }
+
     // Update in process.env immediately (runtime)
     process.env[req.params.key] = value;
-    // Persist to .env file so the key survives server restarts
-    persistToEnvFile(req.params.key, value);
 
     await AdminAuditLog.create({
       adminId:    req.user._id,

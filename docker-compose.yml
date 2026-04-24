@@ -1,0 +1,14 @@
+# Local MongoDB for development when Atlas / SRV DNS is blocked or unavailable.
+# From this folder:  docker compose up -d
+# Then set in .env:    MONGODB_URI=mongodb://127.0.0.1:27017/job_search_db
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - '27017:27017'
+    volumes:
+      - jobhunter_mongo_data:/data/db
+
+volumes:
+  jobhunter_mongo_data:

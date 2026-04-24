@@ -4,7 +4,7 @@
  * Also tests credit deduction behaviour and daily search limits.
  *
  * Usage:
- *   node tests/e2e-plan-guard.test.js
+ *   node tests/e2e-plan-guard.e2e.js
  *
  * Set env vars (or create .env.test):
  *   FREE_EMAIL=<free user email>

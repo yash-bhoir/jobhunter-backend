@@ -7,9 +7,13 @@
     "node": ">=18.0.0"
   },
   "scripts": {
+    "ports:free": "npx --yes kill-port@2.0.1 5000 3000",
     "dev": "nodemon server.js",
     "logs:errors": "node scripts/tailLogs.js error",
     "logs:combined": "node scripts/tailLogs.js combined",
+    "dev:local": "cross-env USE_IN_MEMORY_MONGO=1 nodemon server.js",
+    "mongo:up": "docker compose up -d",
+    "mongo:down": "docker compose down",
     "start": "node server.js",
     "test": "jest --coverage",
     "test:job-apis": "node src/scripts/testJobSearchApis.js",
@@ -18,11 +22,11 @@
   },
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",
-    "axios": "^1.13.6",
+    "axios": "^1.14.1",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.71.1",
     "cheerio": "^1.2.0",
-    "cloudinary": "^1.41.0",
+    "cloudinary": "^2.7.0",
     "compression": "^1.7.4",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
@@ -32,6 +36,7 @@
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^7.1.5",
     "express-validator": "^7.0.1",
+    "exceljs": "^4.4.0",
     "googleapis": "^171.4.0",
     "helmet": "^7.1.0",
     "joi": "^17.11.0",
@@ -40,7 +45,7 @@
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "node-cron": "^3.0.3",
-    "nodemailer": "^6.9.7",
+    "nodemailer": "^8.0.5",
     "openai": "^4.20.1",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
@@ -54,14 +59,18 @@
     "redis": "^4.6.10",
     "rss-parser": "^3.13.0",
     "socket.io": "^4.6.1",
-    "uuid": "^9.0.1",
-    "winston": "^3.11.0",
-    "xlsx": "^0.18.5"
+    "uuid": "14.0.0",
+    "winston": "^3.11.0"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "eslint": "^8.55.0",
     "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.1.4",
     "nodemon": "^3.0.2",
     "supertest": "^6.3.3"
+  },
+  "overrides": {
+    "uuid": "14.0.0"
   }
 }

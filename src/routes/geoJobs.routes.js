@@ -8,6 +8,9 @@ router.use(authenticate);
 // Search
 router.get('/nearby',     ctrl.getNearbyJobs);
 
+// Backfill geo on canonical Job documents (Nominatim + cache; rate-limited)
+router.post('/enrich-stored', ctrl.enrichStoredJobs);
+
 // Saved state
 router.get('/saved-ids',  ctrl.getSavedGeoJobIds);
 

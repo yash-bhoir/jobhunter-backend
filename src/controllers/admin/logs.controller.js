@@ -3,6 +3,8 @@ const AdminAuditLog = require('../../models/AdminAuditLog');
 const ErrorLog      = require('../../models/ErrorLog');
 const { success, paginated } = require('../../utils/response.util');
 
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 exports.getLogs = async (req, res, next) => {
   try {
     const page     = parseInt(req.query.page)     || 1;
@@ -15,7 +17,7 @@ exports.getLogs = async (req, res, next) => {
     const filter = {};
     if (category) filter.category = category;
     if (userId)   filter.userId   = userId;
-    if (event)    filter.event    = { $regex: event, $options: 'i' };
+    if (event)    filter.event    = { $regex: escapeRegex(event), $options: 'i' };
 
     const [logs, total] = await Promise.all([
       ActivityLog.find(filter)
@@ -58,18 +60,31 @@ exports.exportLogs = async (req, res, next) => {
       .limit(1000)
       .lean();
 
-    const XLSX   = require('xlsx');
-    const rows   = logs.map(l => [
-      l.createdAt, l.userId, l.event, l.category,
-      l.creditsUsed, l.ip, JSON.stringify(l.metadata),
-    ]);
-    const ws = XLSX.utils.aoa_to_sheet([
-      ['Date', 'UserID', 'Event', 'Category', 'Credits Used', 'IP', 'Metadata'],
-      ...rows,
-    ]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Logs');
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Logs', { views: [{ state: 'frozen', ySplit: 1 }] });
+
+    ws.addRow(['Date', 'UserID', 'Event', 'Category', 'Credits Used', 'IP', 'Metadata']);
+    ws.getRow(1).font = { bold: true };
+
+    for (const l of logs) {
+      ws.addRow([
+        l.createdAt,
+        l.userId,
+        l.event,
+        l.category,
+        l.creditsUsed,
+        l.ip,
+        JSON.stringify(l.metadata),
+      ]);
+    }
+
+    ws.columns = [
+      { width: 24 }, { width: 26 }, { width: 28 }, { width: 16 },
+      { width: 14 }, { width: 16 }, { width: 60 },
+    ];
+
+    const buffer = await wb.xlsx.writeBuffer();
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=logs.xlsx');
@@ -104,7 +119,7 @@ exports.getErrorLogs = async (req, res, next) => {
     if (type)                  filter.type       = type;
     if (resolved !== undefined) filter.resolved  = resolved === 'true';
     if (userId)                filter.userId     = userId;
-    if (search)                filter.message    = { $regex: search, $options: 'i' };
+    if (search)                filter.message    = { $regex: escapeRegex(search), $options: 'i' };
 
     const [logs, total] = await Promise.all([
       ErrorLog.find(filter)

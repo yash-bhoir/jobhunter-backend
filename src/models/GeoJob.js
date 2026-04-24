@@ -23,7 +23,7 @@ const geoJobSchema = new mongoose.Schema(
     tags:       [String],
     postedAt:   { type: Date, default: Date.now },
     externalId: { type: String, index: true },  // dedup key from source API
-    source:     { type: String },               // 'Adzuna', 'JSearch', 'seed'
+    source:     { type: String },               // 'Adzuna', 'JSearch', 'Google Jobs', …
     expiresAt:  { type: Date, index: { expireAfterSeconds: 0 } }, // TTL — auto-delete after 24h
   },
   { timestamps: true }

@@ -171,7 +171,7 @@ exports.exportExcel = async (req, res, next) => {
       .limit(200)
       .lean();
 
-    const XLSX = require('xlsx');
+    const ExcelJS = require('exceljs');
 
     const headers = [
       'Company', 'Job Title', 'Location', 'Salary', 'Match %',
@@ -180,44 +180,43 @@ exports.exportExcel = async (req, res, next) => {
       'Career Page', 'Job URL', 'Applied Date',
     ];
 
-    const rows = jobs.map(j => [
-      j.company        || '',
-      j.title          || '',
-      j.location       || '',
-      j.salary         || '',
-      `${j.matchScore  || 0}%`,
-      j.source         || '',
-      j.remote         ? 'Yes' : 'No',
-      j.status         || '',
-      j.recruiterEmail || '',           // ← HR email auto-filled
-      j.recruiterName  || '',
-      j.recruiterConfidence ? `${j.recruiterConfidence}%` : '',
-      j.recruiterSource    || '',
-      j.careerPageUrl      || '',
-      j.url                || '',
-      j.appliedAt ? new Date(j.appliedAt).toLocaleDateString() : '',
-    ]);
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Jobs', { views: [{ state: 'frozen', ySplit: 1 }] });
 
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-    ws['!cols'] = headers.map(() => ({ wch: 22 }));
+    ws.addRow(headers);
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE8F4FD' },
+    };
 
-    // Style header row green
-    const range = XLSX.utils.decode_range(ws['!ref']);
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const addr = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (!ws[addr]) continue;
-      ws[addr].s = {
-        fill: { fgColor: { rgb: 'E8F4FD' } },
-        font: { bold: true },
-      };
+    for (const j of jobs) {
+      ws.addRow([
+        j.company        || '',
+        j.title          || '',
+        j.location       || '',
+        j.salary         || '',
+        `${j.matchScore  || 0}%`,
+        j.source         || '',
+        j.remote         ? 'Yes' : 'No',
+        j.status         || '',
+        j.recruiterEmail || '',
+        j.recruiterName  || '',
+        j.recruiterConfidence ? `${j.recruiterConfidence}%` : '',
+        j.recruiterSource    || '',
+        j.careerPageUrl      || '',
+        j.url                || '',
+        j.appliedAt ? new Date(j.appliedAt).toLocaleDateString() : '',
+      ]);
     }
 
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Jobs');
+    ws.columns = headers.map(() => ({ width: 22 }));
 
     // Summary sheet
     const emailsWithHR = jobs.filter(j => j.recruiterEmail).length;
-    const summary = [
+    const ws2 = wb.addWorksheet('Summary');
+    ws2.addRows([
       ['JobHunter - Job Search Report'],
       ['Generated',      new Date().toLocaleString()],
       ['Total Jobs',     jobs.length],
@@ -226,12 +225,11 @@ exports.exportExcel = async (req, res, next) => {
       ['Applied',        jobs.filter(j => j.status === 'applied').length],
       ['Interview',      jobs.filter(j => j.status === 'interview').length],
       ['Offer',          jobs.filter(j => j.status === 'offer').length],
-    ];
-    const ws2 = XLSX.utils.aoa_to_sheet(summary);
-    ws2['!cols'] = [{ wch: 20 }, { wch: 30 }];
-    XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
+    ]);
+    ws2.getColumn(1).width = 20;
+    ws2.getColumn(2).width = 30;
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await wb.xlsx.writeBuffer();
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=jobhunter-results.xlsx');

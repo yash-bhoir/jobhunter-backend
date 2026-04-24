@@ -63,8 +63,26 @@ const jobSchema = new mongoose.Schema({
   companyId:   { type: mongoose.Types.ObjectId, ref: 'Company',   default: null },
   globalJobId: { type: mongoose.Types.ObjectId, ref: 'GlobalJob', default: null },
 
-  // Geo data for radius-based search
+  // Geo data for radius-based search (legacy lat/lng object)
   geoLocation: { lat: Number, lng: Number },
+  /** GeoJSON Point for MongoDB 2dsphere queries — [lng, lat] (omit field until set) */
+  geo: {
+    type:        { type: String, enum: ['Point'] },
+    coordinates: { type: [Number] },
+  },
+  geoConfidence: {
+    type: String,
+    enum:   ['high', 'medium', 'low', 'none'],
+    default: null,
+  },
+  geoSource:     { type: String, default: null },
+  geoEnrichedAt: Date,
+  geoAttempts:   { type: Number, default: 0 },
+  workMode: {
+    type:    String,
+    enum:    ['remote', 'hybrid', 'onsite', 'unknown'],
+    default: 'unknown',
+  },
   distanceKm:  { type: Number, default: null },
 
   postedAt: Date,
@@ -112,5 +130,10 @@ jobSchema.index({ userId: 1, company: 1 });
 jobSchema.index({ userId: 1, contentFingerprint: 1 });
 // TTL-friendly: mark expired jobs in maintenance
 jobSchema.index({ expired: 1, createdAt: 1 });
+// Map radius search (sparse: only docs with coordinates)
+jobSchema.index({ geo: '2dsphere' }, { sparse: true });
+jobSchema.index({ userId: 1, geoEnrichedAt: 1 });
+// Geo enrichment backfill — filters on userId + geoAttempts + expired
+jobSchema.index({ userId: 1, geoAttempts: 1, expired: 1 });
 
 module.exports = mongoose.model('Job', jobSchema);

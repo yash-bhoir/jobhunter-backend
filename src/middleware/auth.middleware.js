@@ -2,6 +2,7 @@ const { verifyAccessToken }         = require('../utils/jwt.util');
 const { AuthError, ForbiddenError } = require('../utils/errors');
 const User                          = require('../models/User');
 const { cache }                     = require('../config/redis');
+const { ACCESS_COOKIE }             = require('../utils/authCookies.util');
 
 // ── How long to cache a user object (seconds) ─────────────────────
 // Short TTL so plan/ban changes propagate quickly.
@@ -13,13 +14,20 @@ const USER_CACHE_TTL = 60;
 // Cache key helper
 const userCacheKey = (id) => `auth:user:${id}`;
 
+const getAccessTokenFromRequest = (req) => {
+  const header = req.headers.authorization;
+  if (header?.startsWith('Bearer ')) return header.split(' ')[1];
+  const fromCookie = req.cookies?.[ACCESS_COOKIE];
+  if (fromCookie) return fromCookie;
+  return null;
+};
+
 const authenticate = async (req, _res, next) => {
   try {
-    const header = req.headers.authorization;
-    if (!header?.startsWith('Bearer '))
-      throw new AuthError('No token provided');
+    const token = getAccessTokenFromRequest(req);
+    if (!token) throw new AuthError('No token provided');
 
-    const decoded = verifyAccessToken(header.split(' ')[1]);
+    const decoded = verifyAccessToken(token);
     const cacheKey = userCacheKey(decoded.id);
 
     // ── Try Redis cache first ──────────────────────────────────────

@@ -12,8 +12,64 @@
  */
 
 const axios = require('axios');
+const { URL } = require('url');
 const Job   = require('../../models/Job');
 const logger = require('../../config/logger');
+
+const isBlockedHostname = (hostname) => {
+  const h = String(hostname || '').toLowerCase();
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h.endsWith('.local')) return true;
+
+  // Common cloud metadata endpoints
+  if (h === 'metadata.google.internal') return true;
+  if (h === '169.254.169.254') return true;
+
+  // IPv6 loopback and private ranges
+  if (h === '::1') return true;
+  if (h === '0:0:0:0:0:0:0:1') return true;
+  // Strip brackets from [::1] style URLs
+  const stripped = h.replace(/^\[|\]$/g, '');
+  if (stripped === '::1') return true;
+  // Unique-local (fc00::/7) and link-local (fe80::/10)
+  if (/^fe[89ab][0-9a-f]:/i.test(stripped)) return true;
+  if (/^fc[0-9a-f]{2}:/i.test(stripped) || /^fd[0-9a-f]{2}:/i.test(stripped)) return true;
+
+  // IPv4 literal checks (basic)
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const oct = m.slice(1, 5).map(n => Number(n));
+    if (oct.some(n => n > 255)) return true;
+    const [a, b, c, d] = oct;
+    if (a === 10) return true;
+    if (a === 127) return true;
+    if (a === 0) return true;
+    if (a === 255 && b === 255 && c === 255 && d === 255) return true; // broadcast
+    if (a === 169 && b === 254) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+  }
+
+  return false;
+};
+
+const assertPublicHttpUrl = (raw) => {
+  if (!raw || typeof raw !== 'string') return null;
+  if (raw.length > 2048) return null;
+
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+
+  const protocol = u.protocol.toLowerCase();
+  if (protocol !== 'http:' && protocol !== 'https:') return null;
+  if (u.username || u.password) return null;
+
+  const hostname = u.hostname;
+  if (isBlockedHostname(hostname)) return null;
+
+  return u.toString();
+};
 
 // ── Expiration phrases (EN + HI + DE + FR + JA + ES + PT) ──────────
 const EXPIRED_PATTERNS = [
@@ -61,10 +117,11 @@ const APPLY_PATTERNS = [
  * Classify a URL as active | expired | uncertain
  */
 const classifyLiveness = async (url) => {
-  if (!url) return 'uncertain';
+  const safeUrl = assertPublicHttpUrl(url);
+  if (!safeUrl) return 'uncertain';
 
   try {
-    const response = await axios.get(url, {
+    const response = await axios.get(safeUrl, {
       timeout: 8000,
       maxRedirects: 5,
       headers: {

@@ -65,8 +65,25 @@ const cache = {
   delPattern: async (pattern) => {
     try {
       if (!client) return;
-      const keys = await client.keys(pattern);
-      if (keys.length > 0) await client.del(keys);
+      if (typeof client.scanIterator === 'function') {
+        const keys = [];
+        for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 200 })) {
+          keys.push(key);
+          if (keys.length >= 500) {
+            await client.del(keys);
+            keys.length = 0;
+          }
+        }
+        if (keys.length > 0) await client.del(keys);
+        return;
+      }
+
+      let cursor = '0';
+      do {
+        const [next, batch] = await client.scan(cursor, { MATCH: pattern, COUNT: 200 });
+        cursor = next;
+        if (batch.length > 0) await client.del(batch);
+      } while (cursor !== '0');
     } catch { }
   },
 };

@@ -27,6 +27,7 @@ const {
   ingestJob,
 }                        = require('../services/companyStore.service');
 const { recordSearchImpressions } = require('../services/ranking/rankingFeedback.service');
+const { scheduleGeoEnrichment }   = require('../services/geo/jobGeoEnrichment.service');
 const { emitToUser }     = require('../config/socket');
 const { success, paginated } = require('../utils/response.util');
 const { NotFoundError, ValidationError } = require('../utils/errors');
@@ -418,6 +419,7 @@ exports.runSearch = async (req, res, next) => {
       linkRecruitersToJobs(req.user._id, savedJobIds).catch(err =>
         logger.warn('dataLinker async failed:', err.message)
       );
+      scheduleGeoEnrichment(savedJobIds);
     }
 
     // ── Update search record ──────────────────────────────────────

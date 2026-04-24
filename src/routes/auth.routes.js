@@ -66,7 +66,7 @@ router.get('/google/callback', ctrl.googleCallback);
 // ── Dev only — on by default in development; set ALLOW_DEV_AUTH_ROUTES=false to disable
 const devAuthRoutesEnabled =
   process.env.NODE_ENV === 'development' &&
-  process.env.ALLOW_DEV_AUTH_ROUTES !== 'false';
+  (process.env.ALLOW_DEV_AUTH_ROUTES || 'true').toLowerCase() !== 'false';
 
 if (devAuthRoutesEnabled) {
   router.get('/dev/verify/:email', async (req, res) => {

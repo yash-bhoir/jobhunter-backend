@@ -8,9 +8,16 @@ const { sendEmail, templates }               = require('../config/mailer');
 const { success, created }                   = require('../utils/response.util');
 const { AuthError, ConflictError, NotFoundError, ValidationError } = require('../utils/errors');
 const { PLAN_CREDITS } = require('../utils/constants');
-const { refreshCookieOptions, clearRefreshCookie } = require('../utils/refreshCookie.util');
 const { invalidateUserCache } = require('../middleware/auth.middleware');
 const logger = require('../config/logger');
+const { setAuthCookies, clearAuthCookies } = require('../utils/authCookies.util');
+
+function isGoogleOAuthReady() {
+  return Boolean(
+    process.env.GOOGLE_CLIENT_ID?.trim() &&
+    process.env.GOOGLE_CLIENT_SECRET?.trim()
+  );
+}
 
 // ── Helper ────────────────────────────────────────────────────────
 function getNextMonthReset() {
@@ -122,7 +129,7 @@ exports.login = async (req, res, next) => {
 
     // ── Admin 2-FA: send OTP instead of issuing tokens directly ──
     if (['admin', 'super_admin'].includes(user.role)) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otp = crypto.randomInt(100000, 1000000).toString();
 
       user.adminOtpCode    = otp;
       user.adminOtpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 min
@@ -168,13 +175,12 @@ exports.login = async (req, res, next) => {
       refreshSessionVersion:  user.refreshSessionVersion ?? 0,
     });
 
-    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+    setAuthCookies(res, tokens);
 
     logger.info(`User logged in: ${email}`);
 
     return success(res, {
-      accessToken: tokens.accessToken,
-      user:        user.toSafeObject(),
+      user: user.toSafeObject(),
     }, 'Login successful');
 
   } catch (err) {
@@ -187,7 +193,7 @@ exports.logout = async (req, res, next) => {
   try {
     await User.findByIdAndUpdate(req.user._id, { $inc: { refreshSessionVersion: 1 } });
     invalidateUserCache(String(req.user._id));
-    clearRefreshCookie(res);
+    clearAuthCookies(res);
     return success(res, null, 'Logged out successfully');
   } catch (err) {
     next(err);
@@ -234,13 +240,13 @@ exports.refresh = async (req, res, next) => {
     });
 
     invalidateUserCache(String(decoded.id));
-    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+    setAuthCookies(res, tokens);
 
-    return success(res, { accessToken: tokens.accessToken }, 'Token refreshed');
+    return success(res, null, 'Token refreshed');
 
   } catch (err) {
-    // Drop stale httpOnly cookie so the browser stops sending it on every /auth/me + refresh loop.
-    clearRefreshCookie(res);
+    // Drop stale httpOnly cookies so the browser stops sending them on every /auth/me + refresh loop.
+    clearAuthCookies(res);
     next(err);
   }
 };
@@ -268,14 +274,11 @@ exports.oauthExchange = async (req, res, next) => {
       refreshSessionVersion:  user.refreshSessionVersion ?? 0,
     });
 
-    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+    setAuthCookies(res, tokens);
 
-    return success(res, {
-      accessToken: tokens.accessToken,
-      user:        user.toSafeObject(),
-    }, 'Login successful');
+    return success(res, { user: user.toSafeObject() }, 'Login successful');
   } catch (err) {
-    clearRefreshCookie(res);
+    clearAuthCookies(res);
     next(err);
   }
 };
@@ -393,6 +396,18 @@ exports.getMe = async (req, res, next) => {
 
 // ── Google OAuth ──────────────────────────────────────────────────
 exports.googleAuth = (req, res, next) => {
+  if (!isGoogleOAuthReady()) {
+    const back = process.env.CLIENT_URL || 'http://localhost:3000';
+    logger.warn('GET /auth/google — Google OAuth env vars missing');
+    return res.status(503).type('html').send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Google sign-in unavailable</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:system-ui,sans-serif;padding:2rem;max-width:36rem;line-height:1.5">
+<h1 style="font-size:1.25rem">Google sign-in is not configured</h1>
+<p>Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> to <strong>jobhunter-backend/.env</strong>, then restart the API.</p>
+<p><a href="${back}/login">← Back to login</a></p>
+</body></html>`);
+  }
   const passport = require('../config/passport');
   passport.authenticate('google', {
     scope: ['profile', 'email'],
@@ -435,13 +450,12 @@ exports.verifyAdminOtp = async (req, res, next) => {
       refreshSessionVersion:  user.refreshSessionVersion ?? 0,
     });
 
-    res.cookie('refreshToken', tokens.refreshToken, refreshCookieOptions());
+    setAuthCookies(res, tokens);
 
     logger.info(`Admin verified OTP and logged in: ${user.email}`);
 
     return success(res, {
-      accessToken: tokens.accessToken,
-      user:        user.toSafeObject(),
+      user: user.toSafeObject(),
     }, 'Login successful');
 
   } catch (err) {
@@ -450,6 +464,10 @@ exports.verifyAdminOtp = async (req, res, next) => {
 };
 
 exports.googleCallback = (req, res, next) => {
+  if (!isGoogleOAuthReady()) {
+    const back = process.env.CLIENT_URL || 'http://localhost:3000';
+    return res.redirect(`${back}/login?error=google_not_configured`);
+  }
   const passport = require('../config/passport');
   passport.authenticate('google', { session: false }, async (err, user) => {
     if (err || !user) {

@@ -1,5 +1,22 @@
 const { Server } = require('socket.io');
 const logger = require('./logger');
+const User = require('../models/User');
+const { verifyAccessToken } = require('../utils/jwt.util');
+const { ACCESS_COOKIE } = require('../utils/authCookies.util');
+
+const parseCookies = (cookieHeader) => {
+  const out = {};
+  if (!cookieHeader || typeof cookieHeader !== 'string') return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (!k) continue;
+    try { out[k] = decodeURIComponent(v); } catch { out[k] = v; }
+  }
+  return out;
+};
 
 let io;
 
@@ -36,16 +53,47 @@ const initSocket = async (server) => {
     logger.warn('Socket.IO Redis adapter failed, using in-memory:', err.message);
   }
 
-  io.on('connection', (socket) => {
+  io.on('connection', async (socket) => {
     logger.debug(`Socket connected: ${socket.id}`);
 
+    // Register handlers immediately — the join guard checks socket.data.userId which
+    // is only set after auth completes, so early events are silently dropped safely.
     socket.on('join', (userId) => {
+      if (!socket.data.userId || String(userId) !== socket.data.userId) return;
       socket.join(`user:${userId}`);
     });
 
     socket.on('disconnect', () => {
       logger.debug(`Socket disconnected: ${socket.id}`);
     });
+
+    try {
+      const headerCookie =
+        socket.handshake.headers?.cookie ||
+        socket.request?.headers?.cookie ||
+        '';
+      const cookies = parseCookies(headerCookie);
+      const token =
+        socket.handshake.auth?.token ||
+        cookies[ACCESS_COOKIE] ||
+        null;
+
+      if (!token) {
+        socket.disconnect(true);
+        return;
+      }
+
+      const decoded = verifyAccessToken(token);
+      const user = await User.findById(decoded.id).select('_id status').lean();
+      if (!user || user.status === 'banned') {
+        socket.disconnect(true);
+        return;
+      }
+
+      socket.data.userId = String(user._id);
+    } catch {
+      socket.disconnect(true);
+    }
   });
 
   return io;
